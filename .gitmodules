@@ -1,0 +1,3 @@
+[submodule "echo-workbench/echo-vmat"]
+	path = echo-workbench/echo-vmat
+	url = https://github.com/PortPy-Project/ECHO-VMAT
