@@ -61,6 +61,7 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] Added initial Next.js frontend (run setup, live progress, DVH/metrics/timing views)
 - [x] UI now supports loading existing runs and shows DVH image + metrics table
 - [x] Runner now writes a shareable `clinical_criteria.html` artifact per run
+- [x] UI refreshed to an enterprise-style console layout with live trace chart + run queue
 
 ---
 

@@ -43,16 +43,31 @@ def _append_jsonl(path: Path, payload: dict) -> None:
         handle.write("\n")
 
 
-def _log_event(out_dir: Path, stage: str, message: str, level: str = "info") -> None:
+def _log_event(out_dir: Path, stage: str, message: str, level: str = "info", data: dict | None = None) -> None:
     event = {
         "ts": _now_iso(),
         "stage": stage,
         "level": level,
         "message": message,
     }
+    if data is not None:
+        event["data"] = data
     _append_jsonl(out_dir / "events.jsonl", event)
     with (out_dir / "logs.txt").open("a", encoding="utf-8") as handle:
         handle.write(f"[{event['ts']}] {level.upper()} {stage}: {message}\n")
+
+
+def _emit_trace(out_dir: Path, sol_convergence: list[dict], step_label: str) -> None:
+    for sol in sol_convergence:
+        data = {
+            "step": step_label,
+            "outer_iteration": sol.get("outer_iteration"),
+            "inner_iteration": sol.get("inner_iteration"),
+            "intermediate_obj_value": sol.get("intermediate_obj_value"),
+            "actual_obj_value": sol.get("actual_obj_value"),
+            "accept": sol.get("accept"),
+        }
+        _log_event(out_dir, "trace", "trace_point", data=data)
 
 
 def _update_status(out_dir: Path, payload: dict) -> None:
@@ -334,6 +349,7 @@ def run_echo_example(
     final_convergence = []
     if not clinical_criteria.dvh_table.empty:
         sol_convergence = vmat_opt.run_sequential_cvx_algo(solver=solver, verbose=True)
+        _emit_trace(out_dir, sol_convergence, "step_0")
         final_convergence.extend(sol_convergence)
         sol = sol_convergence[vmat_opt.best_iteration]
         solutions.append(sol)
@@ -346,6 +362,7 @@ def run_echo_example(
             clinical_criteria.get_low_dose_vox_ind(my_plan, dose=dose, inf_matrix=my_plan.inf_matrix)
         vmat_opt.set_step_num(i + 1)
         sol_convergence = vmat_opt.run_sequential_cvx_algo(solver=solver, verbose=True)
+        _emit_trace(out_dir, sol_convergence, f"step_{i + 1}")
         final_convergence.extend(sol_convergence)
         sol = final_convergence[vmat_opt.best_iteration]
         solutions.append(sol)

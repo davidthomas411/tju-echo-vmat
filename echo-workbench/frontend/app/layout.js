@@ -1,7 +1,7 @@
 import "./globals.css";
-import { Fraunces, IBM_Plex_Sans } from "next/font/google";
+import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
 
-const heading = Fraunces({
+const heading = Space_Grotesk({
   subsets: ["latin"],
   variable: "--font-heading",
   weight: ["400", "600", "700"],
