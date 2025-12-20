@@ -14,6 +14,7 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 - [x] FastAPI backend with run management + SSE logs + artifacts
 - [x] Next.js UI with run setup, live logs, DVH, and clinical metrics
 - [x] Interactive DVH plot (hover values, percent axes)
+- [x] Run comparison (overlay DVHs + metric deltas)
 - [x] CT viewer with window/level + wheel slice navigation
 - [x] Optional 3D dose export + CT/dose color overlay
 - [x] Standalone DVH + clinical criteria figure generator
@@ -77,6 +78,7 @@ UI notes:
 - Load a run from the Run Queue.
 - Click "Create 3D Dose" once to save `dose_3d.npy` for that run.
 - Toggle Dose Overlay in the CT viewer (fast, no recompute).
+- Use Run Comparison to overlay two DVHs and compute metric deltas.
 
 ## Artifacts Per Run
 All run outputs are saved under:

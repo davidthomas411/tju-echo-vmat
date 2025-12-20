@@ -51,7 +51,9 @@ class RunResponse(BaseModel):
 
 
 app = FastAPI()
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+access_logger = logging.getLogger("uvicorn.access")
+access_logger.disabled = True
+access_logger.propagate = False
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

@@ -52,9 +52,8 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] Created Python venv `echo-vmat-venv` (Python 3.10)
 - [x] Cloned official ECHO-VMAT repo into `echo-workbench/echo-vmat`
 - [x] Installed ECHO-VMAT dependencies + MOSEK Python package
-- [~] Verified one official example run
-  - Last run reached solver completion; evaluation crashed during metrics export (Styler vs DataFrame)
-  - Fix applied; re-run pending to confirm artifacts + metrics
+- [x] Verified example run (fast/super-fast) produces artifacts end-to-end
+- [~] Full-resolution example run validated (still pending)
 - [x] Added `backend/runner.py` wrapper with voxel-coordinate fallback and fast/super-fast modes
 - [x] Fixed evaluation call to `get_low_dose_vox_ind` and hardened metrics export (Styler -> DataFrame)
 - [x] Implemented adapter skeletons and FastAPI backend endpoints (runs + SSE + artifacts)
@@ -62,6 +61,10 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] UI now supports loading existing runs and shows DVH image + metrics table
 - [x] Runner now writes a shareable `clinical_criteria.html` artifact per run
 - [x] UI refreshed to an enterprise-style console layout with live trace chart + run queue
+- [x] Interactive DVH plot (hover values, percent axes, focus filter)
+- [x] Run comparison (overlay DVHs + metric delta table)
+- [x] CT viewer with window/level + wheel navigation
+- [x] Optional 3D dose export + CT/dose overlay (no recompute on display)
 
 ---
 

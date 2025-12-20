@@ -158,6 +158,78 @@ function arraysEqual(a, b) {
   return true;
 }
 
+function buildDvhSeries(data, label, colorMap, dash) {
+  if (!data) {
+    return [];
+  }
+  return Object.entries(data)
+    .map(([name, values], idx) => {
+      const rawDose = Array.isArray(values?.dose_gy) ? values.dose_gy : [];
+      const rawVol = Array.isArray(values?.volume_fraction) ? values.volume_fraction : [];
+      const dose = rawDose
+        .map((value) => (Number.isFinite(value) ? value : Number.parseFloat(value)))
+        .filter((value) => Number.isFinite(value));
+      const volume = rawVol
+        .map((value) => (Number.isFinite(value) ? value : Number.parseFloat(value)))
+        .filter((value) => Number.isFinite(value));
+      const length = Math.min(dose.length, volume.length);
+      const stride = length > 1200 ? Math.ceil(length / 1200) : 1;
+      const doseSampled = stride === 1 ? dose : dose.filter((_, i) => i % stride === 0);
+      const volSampled = stride === 1 ? volume : volume.filter((_, i) => i % stride === 0);
+      return {
+        key: `${label}-${name}-${idx}`,
+        name: label ? `${label} ${name}` : name,
+        structName: name,
+        group: label || "Current",
+        dose: doseSampled,
+        volume: volSampled,
+        maxDose: safeArrayMax(doseSampled),
+        volumeMax: safeArrayMax(volSampled),
+        color: colorMap.get(name) || DVH_COLORS[idx % DVH_COLORS.length],
+        dash,
+      };
+    })
+    .filter((entry) => entry.dose.length && entry.volume.length);
+}
+
+function metricsToMap(rows) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const structure =
+      row["Structure Name"] || row.Structure || row.StructureName || "Unknown";
+    const constraint = row.Constraint || row.Metric || "Metric";
+    const rawValue = row["Plan Value"] ?? row.PlanValue ?? row.Value;
+    const planValue = parseNumeric(extractPlanValue(rawValue) || rawValue);
+    map.set(`${structure}|${constraint}`, {
+      structure,
+      constraint,
+      planValue,
+    });
+  }
+  return map;
+}
+
+function buildDeltaRows(rowsA, rowsB) {
+  const mapA = metricsToMap(rowsA);
+  const mapB = metricsToMap(rowsB);
+  const keys = new Set([...mapA.keys(), ...mapB.keys()]);
+  return Array.from(keys)
+    .map((key) => {
+      const a = mapA.get(key);
+      const b = mapB.get(key);
+      const planA = a?.planValue ?? null;
+      const planB = b?.planValue ?? null;
+      return {
+        structure: a?.structure || b?.structure || "Unknown",
+        constraint: a?.constraint || b?.constraint || "Metric",
+        planA,
+        planB,
+        delta: planA !== null && planB !== null ? planA - planB : null,
+      };
+    })
+    .sort((left, right) => left.structure.localeCompare(right.structure));
+}
+
 function TracePlot({ points }) {
   if (!points.length) {
     return <div className="placeholder">No optimization trace yet.</div>;
@@ -218,6 +290,11 @@ function TracePlot({ points }) {
 }
 
 function DvhPlot({ series, onHover }) {
+  const [hoverX, setHoverX] = useState(null);
+  const hoverSeries = useMemo(() => series.filter((entry) => !entry.dimmed), [series]);
+  const hoverFrame = useRef(null);
+  const hoverPending = useRef(null);
+
   if (!series.length) {
     return <div className="placeholder">No DVH available yet.</div>;
   }
@@ -226,37 +303,51 @@ function DvhPlot({ series, onHover }) {
   const pad = { left: 54, right: 20, top: 20, bottom: 36 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
-  const maxDose = Math.max(...series.map((entry) => entry.maxDose || 0));
+  const maxDose = Math.max(...series.map((entry) => entry.maxDose || 0)) || 1;
   const minDose = 0;
   const volumeScale = series.some((entry) => entry.volumeMax > 1.5) ? 1 : 100;
   const minVol = 0;
   const maxVol = 100;
   const toPercent = (value) => (volumeScale === 1 ? value : value * 100);
 
-  const [hoverX, setHoverX] = useState(null);
-
   function handleMove(event) {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const clamped = Math.min(Math.max(x, pad.left), pad.left + plotW);
-    const dose = minDose + ((clamped - pad.left) / plotW) * (maxDose - minDose);
-    const values = series.map((entry) => {
-      const idx = closestIndex(entry.dose, dose);
-      const vol =
-        entry.volume[idx] ??
-        entry.volume[entry.volume.length - 1] ??
-        null;
-      return {
-        name: entry.name,
-        color: entry.color,
-        volume: vol !== null ? toPercent(vol) : null,
-      };
+    hoverPending.current = clamped;
+    if (hoverFrame.current) {
+      return;
+    }
+    hoverFrame.current = requestAnimationFrame(() => {
+      hoverFrame.current = null;
+      const pendingX = hoverPending.current;
+      if (pendingX === null) {
+        return;
+      }
+      const dose = minDose + ((pendingX - pad.left) / plotW) * (maxDose - minDose);
+      const values = hoverSeries.map((entry) => {
+        const idx = closestIndex(entry.dose, dose);
+        const vol =
+          entry.volume[idx] ??
+          entry.volume[entry.volume.length - 1] ??
+          null;
+        return {
+          name: entry.name,
+          color: entry.color,
+          volume: vol !== null ? toPercent(vol) : null,
+        };
+      });
+      setHoverX(pendingX);
+      onHover?.({ dose, values });
     });
-    setHoverX(clamped);
-    onHover?.({ dose, values });
   }
 
   function handleLeave() {
+    if (hoverFrame.current) {
+      cancelAnimationFrame(hoverFrame.current);
+      hoverFrame.current = null;
+    }
+    hoverPending.current = null;
     setHoverX(null);
     onHover?.(null);
   }
@@ -294,8 +385,10 @@ function DvhPlot({ series, onHover }) {
             points={points}
             fill="none"
             stroke={entry.color}
-            strokeWidth="2"
+            strokeWidth={entry.dimmed ? "1.4" : "2.2"}
+            strokeOpacity={entry.dimmed ? "0.25" : "1"}
             strokeLinecap="round"
+            strokeDasharray={entry.dash ? "6 4" : undefined}
           />
         );
       })}
@@ -362,6 +455,15 @@ export default function HomePage() {
   const [dvhImageUrl, setDvhImageUrl] = useState("");
   const [dvhData, setDvhData] = useState(null);
   const [dvhHover, setDvhHover] = useState(null);
+  const [dvhFocus, setDvhFocus] = useState("all");
+  const [compareRunA, setCompareRunA] = useState("");
+  const [compareRunB, setCompareRunB] = useState("");
+  const [compareDvhA, setCompareDvhA] = useState(null);
+  const [compareDvhB, setCompareDvhB] = useState(null);
+  const [compareMetricsA, setCompareMetricsA] = useState([]);
+  const [compareMetricsB, setCompareMetricsB] = useState([]);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState(null);
   const [ctMeta, setCtMeta] = useState(null);
   const [ctSliceIndex, setCtSliceIndex] = useState(0);
   const [ctWindow, setCtWindow] = useState(400);
@@ -375,6 +477,7 @@ export default function HomePage() {
   const [error, setError] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const resultsLoaded = useRef(false);
+  const wheelThrottle = useRef(0);
 
   const apiBase = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
@@ -513,6 +616,46 @@ export default function HomePage() {
     }
   }
 
+  async function loadComparison() {
+    if (!compareRunA || !compareRunB) {
+      return;
+    }
+    setCompareLoading(true);
+    setCompareError(null);
+    try {
+      const [dvhARes, dvhBRes, metricsARes, metricsBRes] = await Promise.all([
+        fetch(`${apiBase}/runs/${compareRunA}/artifacts/dvh.json`),
+        fetch(`${apiBase}/runs/${compareRunB}/artifacts/dvh.json`),
+        fetch(`${apiBase}/runs/${compareRunA}/artifacts/metrics.json`),
+        fetch(`${apiBase}/runs/${compareRunB}/artifacts/metrics.json`),
+      ]);
+      if (!dvhARes.ok || !dvhBRes.ok) {
+        throw new Error("Failed to load DVH data for comparison.");
+      }
+      const [dvhA, dvhB] = await Promise.all([dvhARes.json(), dvhBRes.json()]);
+      setCompareDvhA(dvhA);
+      setCompareDvhB(dvhB);
+      const metricsA = metricsARes.ok ? await metricsARes.json() : {};
+      const metricsB = metricsBRes.ok ? await metricsBRes.json() : {};
+      setCompareMetricsA(metricsA.records || metricsA.metrics || []);
+      setCompareMetricsB(metricsB.records || metricsB.metrics || []);
+    } catch (err) {
+      setCompareError(err.message || "Comparison failed.");
+    } finally {
+      setCompareLoading(false);
+    }
+  }
+
+  function clearComparison() {
+    setCompareRunA("");
+    setCompareRunB("");
+    setCompareDvhA(null);
+    setCompareDvhB(null);
+    setCompareMetricsA([]);
+    setCompareMetricsB([]);
+    setCompareError(null);
+  }
+
   useEffect(() => {
     refreshRuns();
     const interval = setInterval(refreshRuns, 8000);
@@ -550,7 +693,14 @@ export default function HomePage() {
       return undefined;
     }
     let active = true;
-    const interval = setInterval(async () => {
+    let intervalId = null;
+    const stopPolling = () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+    const poll = async () => {
       try {
         const response = await fetch(`${apiBase}/runs/${runId}`);
         if (!response.ok) {
@@ -569,38 +719,47 @@ export default function HomePage() {
         if (payload.status?.state === "error") {
           setError(payload.status?.error || "Run failed");
           setIsRunning(false);
+          stopPolling();
+          return;
         }
-        if (payload.status?.state === "completed" && !resultsLoaded.current) {
-          resultsLoaded.current = true;
+        if (payload.status?.state === "completed") {
+          if (!resultsLoaded.current) {
+            resultsLoaded.current = true;
+            setIsRunning(false);
+            const [timingRes, metricsRes, traceRes] = await Promise.all([
+              fetch(`${apiBase}/runs/${runId}/artifacts/timing.json`),
+              fetch(`${apiBase}/runs/${runId}/artifacts/metrics.json`),
+              fetch(`${apiBase}/runs/${runId}/artifacts/solver_trace.json`),
+            ]);
+            if (timingRes.ok) {
+              setTiming(await timingRes.json());
+            }
+            if (metricsRes.ok) {
+              const metricsPayload = await metricsRes.json();
+              setMetrics(metricsPayload.records || metricsPayload.metrics || []);
+              setMetricsColumns(metricsPayload.columns || []);
+            }
+            if (traceRes.ok) {
+              setTracePoints(await traceRes.json());
+            }
+          }
           setIsRunning(false);
-          const [timingRes, metricsRes, traceRes] = await Promise.all([
-            fetch(`${apiBase}/runs/${runId}/artifacts/timing.json`),
-            fetch(`${apiBase}/runs/${runId}/artifacts/metrics.json`),
-            fetch(`${apiBase}/runs/${runId}/artifacts/solver_trace.json`),
-          ]);
-          if (timingRes.ok) {
-            setTiming(await timingRes.json());
-          }
-          if (metricsRes.ok) {
-            const metricsPayload = await metricsRes.json();
-            setMetrics(metricsPayload.records || metricsPayload.metrics || []);
-            setMetricsColumns(metricsPayload.columns || []);
-          }
-          if (traceRes.ok) {
-            setTracePoints(await traceRes.json());
-          }
+          stopPolling();
         }
       } catch (err) {
         if (active) {
           setError(err.message || "Failed to fetch run status.");
           setIsRunning(false);
+          stopPolling();
         }
       }
-    }, 1400);
+    };
+    intervalId = setInterval(poll, 2000);
+    poll();
 
     return () => {
       active = false;
-      clearInterval(interval);
+      stopPolling();
     };
   }, [apiBase, runId]);
 
@@ -630,35 +789,58 @@ export default function HomePage() {
       .catch(() => setDvhData(null));
   }, [apiBase, runId, artifacts, dvhData]);
 
+  const structureNames = useMemo(() => {
+    const names = new Set();
+    [dvhData, compareDvhA, compareDvhB].forEach((dataset) => {
+      if (!dataset) {
+        return;
+      }
+      Object.keys(dataset).forEach((name) => names.add(name));
+    });
+    return Array.from(names).sort();
+  }, [dvhData, compareDvhA, compareDvhB]);
+
+  const dvhColorMap = useMemo(() => {
+    const map = new Map();
+    structureNames.forEach((name, idx) => {
+      map.set(name, DVH_COLORS[idx % DVH_COLORS.length]);
+    });
+    return map;
+  }, [structureNames]);
+
+  const baseSeries = useMemo(
+    () => buildDvhSeries(dvhData, "Current", dvhColorMap, false),
+    [dvhData, dvhColorMap]
+  );
+
+  const compareSeriesA = useMemo(
+    () => buildDvhSeries(compareDvhA, "Run A", dvhColorMap, false),
+    [compareDvhA, dvhColorMap]
+  );
+
+  const compareSeriesB = useMemo(
+    () => buildDvhSeries(compareDvhB, "Run B", dvhColorMap, true),
+    [compareDvhB, dvhColorMap]
+  );
+
+  const combinedSeries = useMemo(
+    () => [...baseSeries, ...compareSeriesA, ...compareSeriesB],
+    [baseSeries, compareSeriesA, compareSeriesB]
+  );
+
   const dvhSeries = useMemo(() => {
-    if (!dvhData) {
+    return combinedSeries.map((entry) => ({
+      ...entry,
+      dimmed: dvhFocus !== "all" && entry.structName !== dvhFocus,
+    }));
+  }, [combinedSeries, dvhFocus]);
+
+  const deltaMetrics = useMemo(() => {
+    if (!compareMetricsA.length || !compareMetricsB.length) {
       return [];
     }
-    return Object.entries(dvhData)
-      .map(([name, values], idx) => {
-        const rawDose = Array.isArray(values?.dose_gy) ? values.dose_gy : [];
-        const rawVol = Array.isArray(values?.volume_fraction) ? values.volume_fraction : [];
-        const dose = rawDose
-          .map((value) => (Number.isFinite(value) ? value : Number.parseFloat(value)))
-          .filter((value) => Number.isFinite(value));
-        const volume = rawVol
-          .map((value) => (Number.isFinite(value) ? value : Number.parseFloat(value)))
-          .filter((value) => Number.isFinite(value));
-        const length = Math.min(dose.length, volume.length);
-        const stride = length > 1200 ? Math.ceil(length / 1200) : 1;
-        const doseSampled = stride === 1 ? dose : dose.filter((_, i) => i % stride === 0);
-        const volSampled = stride === 1 ? volume : volume.filter((_, i) => i % stride === 0);
-        return {
-          name,
-          dose: doseSampled,
-          volume: volSampled,
-          maxDose: safeArrayMax(doseSampled),
-          volumeMax: safeArrayMax(volSampled),
-          color: DVH_COLORS[idx % DVH_COLORS.length],
-        };
-      })
-      .filter((entry) => entry.dose.length && entry.volume.length);
-  }, [dvhData]);
+    return buildDeltaRows(compareMetricsA, compareMetricsB);
+  }, [compareMetricsA, compareMetricsB]);
 
   useEffect(() => {
     if (!runId || !artifacts.includes("dose_3d_meta.json")) {
@@ -673,6 +855,12 @@ export default function HomePage() {
       .then((payload) => setDoseMeta(payload))
       .catch(() => setDoseMeta(null));
   }, [apiBase, runId, artifacts, doseMeta]);
+
+  useEffect(() => {
+    if (dvhFocus !== "all" && !structureNames.includes(dvhFocus)) {
+      setDvhFocus("all");
+    }
+  }, [dvhFocus, structureNames]);
 
   useEffect(() => {
     if (doseMax !== null) {
@@ -741,6 +929,11 @@ export default function HomePage() {
       return;
     }
     event.preventDefault();
+    const now = Date.now();
+    if (now - wheelThrottle.current < 30) {
+      return;
+    }
+    wheelThrottle.current = now;
     const direction = event.deltaY > 0 ? 1 : -1;
     setCtSliceIndex((prev) => Math.min(sliceMax, Math.max(0, prev + direction)));
   };
@@ -1034,6 +1227,37 @@ export default function HomePage() {
                 <div className="card-subtitle">Interactive DVH (hover for values)</div>
               </div>
             </div>
+            <div className="dvh-toolbar">
+              <div className="dvh-control">
+                <label htmlFor="dvh-focus">Focus Structure</label>
+                <select
+                  id="dvh-focus"
+                  value={dvhFocus}
+                  onChange={(event) => setDvhFocus(event.target.value)}
+                >
+                  <option value="all">All</option>
+                  {structureNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="dvh-legend">
+                {structureNames.slice(0, 8).map((name) => (
+                  <span key={name} className="dvh-legend-item">
+                    <span
+                      className="dvh-swatch"
+                      style={{ background: dvhColorMap.get(name) || "#5bbcff" }}
+                    />
+                    {name}
+                  </span>
+                ))}
+                {structureNames.length > 8 ? (
+                  <span className="dvh-legend-more">+{structureNames.length - 8} more</span>
+                ) : null}
+              </div>
+            </div>
             <DvhPlot series={dvhSeries} onHover={setDvhHover} />
             {dvhHover ? (
               <div className="dvh-hover">
@@ -1051,6 +1275,88 @@ export default function HomePage() {
             ) : dvhImageUrl ? (
               <div className="card-subtitle">Static snapshot available in artifacts.</div>
             ) : null}
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <div className="card-title">Run Comparison</div>
+                <div className="card-subtitle">Overlay DVHs + metric deltas</div>
+              </div>
+              <div className="comparison-actions">
+                <button className="btn" onClick={loadComparison} disabled={compareLoading}>
+                  {compareLoading ? "Loading..." : "Load Comparison"}
+                </button>
+                <button className="btn btn-ghost" onClick={clearComparison} disabled={!compareRunA && !compareRunB}>
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="comparison-grid">
+              <div className="comparison-control">
+                <label htmlFor="compare-run-a">Run A</label>
+                <select
+                  id="compare-run-a"
+                  value={compareRunA}
+                  onChange={(event) => setCompareRunA(event.target.value)}
+                >
+                  <option value="">Select run</option>
+                  {availableRuns.map((run) => (
+                    <option key={`a-${run.run_id}`} value={run.run_id}>
+                      {run.run_id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="comparison-control">
+                <label htmlFor="compare-run-b">Run B</label>
+                <select
+                  id="compare-run-b"
+                  value={compareRunB}
+                  onChange={(event) => setCompareRunB(event.target.value)}
+                >
+                  <option value="">Select run</option>
+                  {availableRuns.map((run) => (
+                    <option key={`b-${run.run_id}`} value={run.run_id}>
+                      {run.run_id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {compareError ? <div className="placeholder">{compareError}</div> : null}
+            {deltaMetrics.length ? (
+              <div className="table-wrap" style={{ marginTop: "10px" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Structure</th>
+                      <th>Constraint</th>
+                      <th>Run A</th>
+                      <th>Run B</th>
+                      <th>Delta (A-B)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deltaMetrics.map((row, idx) => (
+                      <tr key={`delta-${idx}`}>
+                        <td>{row.structure}</td>
+                        <td>{row.constraint}</td>
+                        <td>{row.planA !== null ? row.planA.toFixed(2) : "--"}</td>
+                        <td>{row.planB !== null ? row.planB.toFixed(2) : "--"}</td>
+                        <td className={row.delta > 0 ? "delta-up" : row.delta < 0 ? "delta-down" : ""}>
+                          {row.delta !== null ? row.delta.toFixed(2) : "--"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="placeholder" style={{ marginTop: "10px" }}>
+                Load two runs to compare metrics.
+              </div>
+            )}
           </div>
 
           <div className="card">
