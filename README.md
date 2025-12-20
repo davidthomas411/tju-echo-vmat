@@ -13,6 +13,9 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 - [x] Adapter skeletons (example + Hugging Face)
 - [x] FastAPI backend with run management + SSE logs + artifacts
 - [x] Next.js UI with run setup, live logs, DVH, and clinical metrics
+- [x] Interactive DVH plot (hover values, percent axes)
+- [x] CT viewer with window/level + wheel slice navigation
+- [x] Optional 3D dose export + CT/dose color overlay
 - [x] Standalone DVH + clinical criteria figure generator
 - [~] Full-resolution example run validated (fast mode ok; full-resolution still pending)
 - [ ] ESAPI adapter (future)
@@ -70,6 +73,11 @@ npm run dev
 ```
 Open: http://localhost:3000
 
+UI notes:
+- Load a run from the Run Queue.
+- Click "Create 3D Dose" once to save `dose_3d.npy` for that run.
+- Toggle Dose Overlay in the CT viewer (fast, no recompute).
+
 ## Artifacts Per Run
 All run outputs are saved under:
 ```
@@ -81,6 +89,7 @@ Key files:
 - `dvh.json` + `dvh_steps.png`
 - `solver_trace.json`
 - `clinical_criteria.html` (shareable report)
+- `dose_3d.npy` + `dose_3d_meta.json` (optional, generated on demand)
 
 ## Data Management
 - Raw data is expected under `echo-workbench/PortPy/data`.
@@ -94,4 +103,3 @@ Key files:
 
 ## License
 PortPy uses Apache 2.0 with a Commons Clause (non-commercial research only). Review upstream license terms before distribution.
-
