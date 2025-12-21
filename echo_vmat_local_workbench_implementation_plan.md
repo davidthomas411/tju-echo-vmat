@@ -363,3 +363,12 @@ By end of day, you can:
 - Export artifacts for analysis
 
 This establishes a **credible, extensible foundation** for future Eclipse‑integrated ECHO‑VMAT research and clinical translation.
+
+---
+
+## 14. Big Project List (Backlog)
+
+- [ ] Optimization: profile full‑resolution runs (peak RAM + time), tighten sparse DDC usage, and document best‑fit presets
+- [ ] GPU feasibility study: dose engine + influence matrix on GPU; assess solver alternatives for conic optimization
+- [ ] ESAPI adapter (Eclipse case + dose export)
+- [ ] Multi‑run orchestration (batch queue + compare dashboard)
