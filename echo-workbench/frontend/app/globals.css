@@ -388,6 +388,17 @@ label {
   pointer-events: none;
 }
 
+.ct-structures {
+  position: absolute;
+  inset: 12px;
+  width: calc(100% - 24px);
+  height: calc(100% - 24px);
+  object-fit: contain;
+  border-radius: 10px;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
 .ct-controls {
   display: grid;
   gap: 10px;

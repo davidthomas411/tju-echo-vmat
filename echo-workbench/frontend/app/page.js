@@ -455,7 +455,6 @@ export default function HomePage() {
   const [dvhImageUrl, setDvhImageUrl] = useState("");
   const [dvhData, setDvhData] = useState(null);
   const [dvhHover, setDvhHover] = useState(null);
-  const [dvhFocus, setDvhFocus] = useState("all");
   const [compareRunA, setCompareRunA] = useState("");
   const [compareRunB, setCompareRunB] = useState("");
   const [compareDvhA, setCompareDvhA] = useState(null);
@@ -468,6 +467,9 @@ export default function HomePage() {
   const [ctSliceIndex, setCtSliceIndex] = useState(0);
   const [ctWindow, setCtWindow] = useState(400);
   const [ctLevel, setCtLevel] = useState(40);
+  const [structures, setStructures] = useState([]);
+  const [structureOverlay, setStructureOverlay] = useState(false);
+  const [structureSelection, setStructureSelection] = useState("all");
   const [doseOverlay, setDoseOverlay] = useState(false);
   const [doseOpacity, setDoseOpacity] = useState(0.5);
   const [doseMin, setDoseMin] = useState(0);
@@ -510,6 +512,9 @@ export default function HomePage() {
     setDvhHover(null);
     setCtMeta(null);
     setCtSliceIndex(0);
+    setStructures([]);
+    setStructureOverlay(false);
+    setStructureSelection("all");
     setDoseOverlay(false);
     setDoseOpacity(0.5);
     setDoseMin(0);
@@ -559,6 +564,9 @@ export default function HomePage() {
     setDvhHover(null);
     setCtMeta(null);
     setCtSliceIndex(0);
+    setStructures([]);
+    setStructureOverlay(false);
+    setStructureSelection("all");
     setDoseOverlay(false);
     setDoseOpacity(0.5);
     setDoseMin(0);
@@ -687,6 +695,26 @@ export default function HomePage() {
   useEffect(() => {
     fetchCtMeta(runId);
   }, [apiBase, runId]);
+
+  useEffect(() => {
+    if (!runId) {
+      setStructures([]);
+      return;
+    }
+    fetch(`${apiBase}/runs/${runId}/structures`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => setStructures(payload?.structures || []))
+      .catch(() => setStructures([]));
+  }, [apiBase, runId]);
+
+  useEffect(() => {
+    if (structureSelection === "all") {
+      return;
+    }
+    if (structures.length && !structures.includes(structureSelection)) {
+      setStructureSelection("all");
+    }
+  }, [structures, structureSelection]);
 
   useEffect(() => {
     if (!runId) {
@@ -828,12 +856,7 @@ export default function HomePage() {
     [baseSeries, compareSeriesA, compareSeriesB]
   );
 
-  const dvhSeries = useMemo(() => {
-    return combinedSeries.map((entry) => ({
-      ...entry,
-      dimmed: dvhFocus !== "all" && entry.structName !== dvhFocus,
-    }));
-  }, [combinedSeries, dvhFocus]);
+  const dvhSeries = useMemo(() => combinedSeries, [combinedSeries]);
 
   const deltaMetrics = useMemo(() => {
     if (!compareMetricsA.length || !compareMetricsB.length) {
@@ -855,12 +878,6 @@ export default function HomePage() {
       .then((payload) => setDoseMeta(payload))
       .catch(() => setDoseMeta(null));
   }, [apiBase, runId, artifacts, doseMeta]);
-
-  useEffect(() => {
-    if (dvhFocus !== "all" && !structureNames.includes(dvhFocus)) {
-      setDvhFocus("all");
-    }
-  }, [dvhFocus, structureNames]);
 
   useEffect(() => {
     if (doseMax !== null) {
@@ -913,6 +930,16 @@ export default function HomePage() {
     }
     return `${apiBase}/runs/${runId}/ct/slice?index=${ctSliceIndex}&window=${ctWindow}&level=${ctLevel}`;
   }, [apiBase, runId, ctMeta, ctSliceIndex, ctWindow, ctLevel]);
+  const structureImageUrl = useMemo(() => {
+    if (!runId || !structureOverlay) {
+      return "";
+    }
+    const namesParam =
+      structureSelection && structureSelection !== "all"
+        ? `&names=${encodeURIComponent(structureSelection)}`
+        : "";
+    return `${apiBase}/runs/${runId}/structures/slice?index=${ctSliceIndex}${namesParam}`;
+  }, [apiBase, runId, structureOverlay, structureSelection, ctSliceIndex]);
   const doseImageUrl = useMemo(() => {
     if (!runId || !doseOverlay || !artifacts.includes("dose_3d.npy")) {
       return "";
@@ -1005,6 +1032,14 @@ export default function HomePage() {
                   ) : (
                     <div className="placeholder">CT slice not available.</div>
                   )}
+                  {structureOverlay && structureImageUrl ? (
+                    <img
+                      className="ct-structures"
+                      src={structureImageUrl}
+                      alt="Structure overlay"
+                      draggable={false}
+                    />
+                  ) : null}
                   {doseOverlay && doseImageUrl ? (
                     <img
                       className="ct-dose"
@@ -1084,6 +1119,36 @@ export default function HomePage() {
                         onChange={(event) => setDoseOpacity(Number(event.target.value))}
                         disabled={!doseOverlay}
                       />
+                    </div>
+                  </div>
+                  <div className="ct-control-row">
+                    <div className="ct-control">
+                      <label htmlFor="structure-overlay">Structure Overlay</label>
+                      <select
+                        id="structure-overlay"
+                        value={structureOverlay ? "on" : "off"}
+                        onChange={(event) => setStructureOverlay(event.target.value === "on")}
+                        disabled={!structures.length}
+                      >
+                        <option value="off">Off</option>
+                        <option value="on">On</option>
+                      </select>
+                    </div>
+                    <div className="ct-control">
+                      <label htmlFor="structure-select">Structure</label>
+                      <select
+                        id="structure-select"
+                        value={structureSelection}
+                        onChange={(event) => setStructureSelection(event.target.value)}
+                        disabled={!structureOverlay || !structures.length}
+                      >
+                        <option value="all">All</option>
+                        {structures.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                   <div className="ct-control-row">
@@ -1228,21 +1293,6 @@ export default function HomePage() {
               </div>
             </div>
             <div className="dvh-toolbar">
-              <div className="dvh-control">
-                <label htmlFor="dvh-focus">Focus Structure</label>
-                <select
-                  id="dvh-focus"
-                  value={dvhFocus}
-                  onChange={(event) => setDvhFocus(event.target.value)}
-                >
-                  <option value="all">All</option>
-                  {structureNames.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </div>
               <div className="dvh-legend">
                 {structureNames.slice(0, 8).map((name) => (
                   <span key={name} className="dvh-legend-item">

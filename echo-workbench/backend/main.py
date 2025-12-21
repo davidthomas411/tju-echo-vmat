@@ -31,6 +31,21 @@ except ImportError:
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
+STRUCTURE_COLORS = [
+    (96, 165, 250),
+    (249, 115, 22),
+    (34, 211, 238),
+    (250, 204, 21),
+    (52, 211, 153),
+    (244, 114, 182),
+    (167, 139, 250),
+    (248, 113, 113),
+    (56, 189, 248),
+    (251, 113, 133),
+    (74, 222, 128),
+    (232, 121, 249),
+]
+
 
 class RunRequest(BaseModel):
     case_id: str
@@ -114,6 +129,38 @@ def _ct_reference(case_dir: Path) -> tuple[dict, Path, str]:
     if not ct_path.exists():
         raise HTTPException(status_code=404, detail="CT data file not found")
     return meta, ct_path, dataset
+
+
+def _structure_entries(case_dir: Path) -> list[dict]:
+    meta_path = case_dir / "StructureSet_MetaData.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="StructureSet_MetaData.json not found")
+    meta = _read_json(meta_path)
+    entries = []
+    for item in meta:
+        name = item.get("name")
+        file_ref = item.get("structure_mask_3d_File")
+        if not name or not file_ref or "/" not in file_ref:
+            continue
+        file_name, dataset = file_ref.split("/", 1)
+        path = case_dir / file_name
+        if not path.exists():
+            continue
+        entries.append({"name": name, "path": path, "dataset": dataset})
+    if not entries:
+        raise HTTPException(status_code=404, detail="No structure masks found")
+    return entries
+
+
+def _mask_edge(mask: np.ndarray) -> np.ndarray:
+    padded = np.pad(mask, 1, mode="constant", constant_values=False)
+    edge = mask & (
+        (~padded[:-2, 1:-1])
+        | (~padded[2:, 1:-1])
+        | (~padded[1:-1, :-2])
+        | (~padded[1:-1, 2:])
+    )
+    return edge
 
 
 def _window_ct(slice_hu: np.ndarray, window: float, level: float) -> np.ndarray:
@@ -290,6 +337,63 @@ def get_ct_slice(
     except ImportError as exc:
         raise HTTPException(status_code=500, detail=f"Pillow not installed: {exc}") from exc
     image = Image.fromarray(slice_u8, mode="L")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return Response(content=buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/runs/{run_id}/structures")
+def list_structures(run_id: str) -> dict:
+    case_dir, _config = _resolve_case_dir(run_id)
+    entries = _structure_entries(case_dir)
+    return {"structures": [entry["name"] for entry in entries]}
+
+
+@app.get("/runs/{run_id}/structures/slice")
+def get_structure_slice(
+    run_id: str,
+    index: int = Query(0, ge=0),
+    names: Optional[str] = Query(None),
+) -> Response:
+    case_dir, _config = _resolve_case_dir(run_id)
+    entries = _structure_entries(case_dir)
+    name_filter = None
+    if names:
+        name_filter = {name.strip().upper() for name in names.split(",") if name.strip()}
+    selected = [
+        entry for entry in entries if name_filter is None or entry["name"].upper() in name_filter
+    ]
+    if not selected:
+        raise HTTPException(status_code=404, detail="No matching structures found")
+    overlay = None
+    color_idx = 0
+    entries_by_path = {}
+    for entry in selected:
+        entries_by_path.setdefault(entry["path"], []).append(entry)
+    for path, path_entries in entries_by_path.items():
+        with h5py.File(path, "r") as handle:
+            for entry in path_entries:
+                data = handle[entry["dataset"]]
+                max_index = data.shape[0] - 1
+                slice_index = min(index, max_index)
+                mask_slice = data[slice_index, :, :]
+                mask = mask_slice > 0
+                edge = _mask_edge(mask)
+                if overlay is None:
+                    overlay = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
+                color = STRUCTURE_COLORS[color_idx % len(STRUCTURE_COLORS)]
+                overlay[edge, 0] = color[0]
+                overlay[edge, 1] = color[1]
+                overlay[edge, 2] = color[2]
+                overlay[edge, 3] = 200
+                color_idx += 1
+    if overlay is None:
+        raise HTTPException(status_code=404, detail="No structure overlay generated")
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"Pillow not installed: {exc}") from exc
+    image = Image.fromarray(overlay, mode="RGBA")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return Response(content=buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
