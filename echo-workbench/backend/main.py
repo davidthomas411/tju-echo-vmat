@@ -152,6 +152,19 @@ def _structure_entries(case_dir: Path) -> list[dict]:
     return entries
 
 
+def _rt_plan_template(case_dir: Path) -> Path:
+    candidates = [
+        case_dir / "rt_plan_echo_vmat.dcm",
+        case_dir / "rt_plan_echo_imrt.dcm",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    for path in sorted(case_dir.glob("rt_plan*.dcm")):
+        return path
+    raise HTTPException(status_code=404, detail="RT plan template DICOM not found")
+
+
 def _mask_edge(mask: np.ndarray) -> np.ndarray:
     padded = np.pad(mask, 1, mode="constant", constant_values=False)
     edge = mask & (
@@ -161,6 +174,20 @@ def _mask_edge(mask: np.ndarray) -> np.ndarray:
         | (~padded[1:-1, 2:])
     )
     return edge
+
+
+def _dilate_mask(mask: np.ndarray, radius: int = 1) -> np.ndarray:
+    if radius <= 0:
+        return mask
+    padded = np.pad(mask, radius, mode="constant", constant_values=False)
+    out = np.zeros_like(mask, dtype=bool)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            out |= padded[
+                radius + dy : radius + dy + mask.shape[0],
+                radius + dx : radius + dx + mask.shape[1],
+            ]
+    return out
 
 
 def _window_ct(slice_hu: np.ndarray, window: float, level: float) -> np.ndarray:
@@ -378,14 +405,14 @@ def get_structure_slice(
                 slice_index = min(index, max_index)
                 mask_slice = data[slice_index, :, :]
                 mask = mask_slice > 0
-                edge = _mask_edge(mask)
+                edge = _dilate_mask(_mask_edge(mask), radius=2)
                 if overlay is None:
                     overlay = np.zeros((mask.shape[0], mask.shape[1], 4), dtype=np.uint8)
                 color = STRUCTURE_COLORS[color_idx % len(STRUCTURE_COLORS)]
                 overlay[edge, 0] = color[0]
                 overlay[edge, 1] = color[1]
                 overlay[edge, 2] = color[2]
-                overlay[edge, 3] = 200
+                overlay[edge, 3] = 230
                 color_idx += 1
     if overlay is None:
         raise HTTPException(status_code=404, detail="No structure overlay generated")
@@ -397,6 +424,34 @@ def get_structure_slice(
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return Response(content=buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/runs/{run_id}/rtplan")
+def create_rt_plan(run_id: str, overwrite: bool = Query(False)) -> dict:
+    out_dir = RUNS_DIR / run_id
+    if not out_dir.exists():
+        raise HTTPException(status_code=404, detail="run not found")
+    rt_path = out_dir / "rt_plan_portpy_vmat.dcm"
+    if rt_path.exists() and not overwrite:
+        return {"status": "exists", "artifact": rt_path.name}
+    try:
+        import portpy.photon as pp
+        from portpy.photon.utils import write_rt_plan_vmat
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"portpy/pydicom not available: {exc}") from exc
+    plan_path = out_dir / "my_plan.pkl"
+    if not plan_path.exists():
+        raise HTTPException(status_code=404, detail="my_plan.pkl not found")
+    case_dir, _config = _resolve_case_dir(run_id)
+    template_path = _rt_plan_template(case_dir)
+    _ensure_echo_vmat_on_path()
+    my_plan = pp.load_plan(plan_name=plan_path.name, path=str(out_dir))
+    write_rt_plan_vmat(
+        my_plan=my_plan,
+        in_rt_plan_file=str(template_path),
+        out_rt_plan_file=str(rt_path),
+    )
+    return {"status": "created", "artifact": rt_path.name}
 
 
 @app.post("/runs/{run_id}/dose-3d")

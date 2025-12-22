@@ -184,6 +184,14 @@ label {
   margin-bottom: 12px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .card-title {
   font-family: var(--font-heading), "Space Grotesk", sans-serif;
   font-size: 16px;

@@ -16,7 +16,9 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 - [x] Interactive DVH plot (hover values, percent axes)
 - [x] Run comparison (overlay DVHs + metric deltas)
 - [x] CT viewer with window/level + wheel slice navigation
+- [x] Structure overlay (per-slice outlines)
 - [x] Optional 3D dose export + CT/dose color overlay
+- [x] RT Plan DICOM export (from ECHO template plan)
 - [x] Standalone DVH + clinical criteria figure generator
 - [~] Full-resolution example run validated (fast mode ok; full-resolution still pending)
 - [ ] ESAPI adapter (future)
@@ -50,6 +52,10 @@ source echo-vmat-venv/bin/activate
 ```
 python -m pip install -r echo-workbench/echo-vmat/requirements.txt
 ```
+Optional (RT Plan export):
+```
+python -m pip install "portpy[pydicom]"
+```
 
 ### 4) Run the ECHO example (CLI)
 ```
@@ -79,6 +85,7 @@ UI notes:
 - Click "Create 3D Dose" once to save `dose_3d.npy` for that run.
 - Toggle Dose Overlay in the CT viewer (fast, no recompute).
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
+- Use "Generate RT Plan" to export a DICOM RT Plan for TPS import.
 
 ## Artifacts Per Run
 All run outputs are saved under:
@@ -92,6 +99,7 @@ Key files:
 - `solver_trace.json`
 - `clinical_criteria.html` (shareable report)
 - `dose_3d.npy` + `dose_3d_meta.json` (optional, generated on demand)
+- `rt_plan_portpy_vmat.dcm` (optional, generated on demand)
 
 ## Data Management
 - Raw data is expected under `echo-workbench/PortPy/data`.

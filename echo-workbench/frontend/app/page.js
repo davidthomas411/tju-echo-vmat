@@ -476,6 +476,8 @@ export default function HomePage() {
   const [doseMax, setDoseMax] = useState(null);
   const [doseMeta, setDoseMeta] = useState(null);
   const [doseStatus, setDoseStatus] = useState("idle");
+  const [rtPlanStatus, setRtPlanStatus] = useState("idle");
+  const [rtPlanFile, setRtPlanFile] = useState("");
   const [error, setError] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const resultsLoaded = useRef(false);
@@ -521,6 +523,8 @@ export default function HomePage() {
     setDoseMax(null);
     setDoseMeta(null);
     setDoseStatus("idle");
+    setRtPlanStatus("idle");
+    setRtPlanFile("");
     resultsLoaded.current = false;
     setIsRunning(true);
     try {
@@ -573,6 +577,8 @@ export default function HomePage() {
     setDoseMax(null);
     setDoseMeta(null);
     setDoseStatus("idle");
+    setRtPlanStatus("idle");
+    setRtPlanFile("");
     resultsLoaded.current = false;
     setRunId(runValue);
     setIsRunning(false);
@@ -621,6 +627,32 @@ export default function HomePage() {
     } catch (err) {
       setDoseStatus("error");
       setError(err.message || "Failed to export 3D dose.");
+    }
+  }
+
+  async function createRtPlan() {
+    if (!runId) {
+      return;
+    }
+    setRtPlanStatus("creating");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/runs/${runId}/rtplan`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`RT Plan export failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      if (payload.status === "created" || payload.status === "exists") {
+        setRtPlanStatus("ready");
+        setRtPlanFile(payload.artifact || "");
+      } else {
+        setRtPlanStatus("idle");
+      }
+    } catch (err) {
+      setRtPlanStatus("error");
+      setError(err.message || "Failed to export RT Plan.");
     }
   }
 
@@ -802,6 +834,19 @@ export default function HomePage() {
       return prev;
     });
   }, [artifacts]);
+
+  useEffect(() => {
+    const planName = artifacts.find((name) => name.endsWith(".dcm") && name.startsWith("rt_plan_"));
+    if (planName) {
+      setRtPlanStatus("ready");
+      setRtPlanFile(planName);
+      return;
+    }
+    if (rtPlanStatus === "ready") {
+      setRtPlanStatus("idle");
+      setRtPlanFile("");
+    }
+  }, [artifacts, rtPlanStatus]);
 
   useEffect(() => {
     if (!runId || !artifacts.includes("dvh.json")) {
@@ -1006,17 +1051,30 @@ export default function HomePage() {
                 <div className="card-title">CT Viewer (Axial)</div>
                 <div className="card-subtitle">Slice navigation + window/level</div>
               </div>
-              <button
-                className="btn"
-                onClick={createDose3d}
-                disabled={!runId || doseReady || doseStatus === "creating"}
-              >
-                {doseReady
-                  ? "3D Dose Ready"
-                  : doseStatus === "creating"
-                    ? "Creating Dose..."
-                    : "Create 3D Dose"}
-              </button>
+              <div className="header-actions">
+                <button
+                  className="btn"
+                  onClick={createDose3d}
+                  disabled={!runId || doseReady || doseStatus === "creating"}
+                >
+                  {doseReady
+                    ? "3D Dose Ready"
+                    : doseStatus === "creating"
+                      ? "Creating Dose..."
+                      : "Create 3D Dose"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={createRtPlan}
+                  disabled={!runId || rtPlanStatus === "creating"}
+                >
+                  {rtPlanStatus === "ready"
+                    ? "RT Plan Ready"
+                    : rtPlanStatus === "creating"
+                      ? "Generating RT Plan..."
+                      : "Generate RT Plan"}
+                </button>
+              </div>
             </div>
             {ctMeta ? (
               <div className="ct-viewer">
@@ -1194,6 +1252,14 @@ export default function HomePage() {
             )}
             {doseStatus === "error" ? (
               <div className="placeholder">3D dose export failed. Check backend logs.</div>
+            ) : null}
+            {rtPlanStatus === "ready" && rtPlanFile ? (
+              <div className="card-subtitle" style={{ marginTop: "8px" }}>
+                RT Plan saved:{" "}
+                <a href={`${apiBase}/runs/${runId}/artifacts/${rtPlanFile}`} target="_blank" rel="noreferrer">
+                  {rtPlanFile}
+                </a>
+              </div>
             ) : null}
           </div>
 

@@ -64,7 +64,9 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] Interactive DVH plot (hover values, percent axes, focus filter)
 - [x] Run comparison (overlay DVHs + metric delta table)
 - [x] CT viewer with window/level + wheel navigation
+- [x] Structure overlay (CT axial outlines)
 - [x] Optional 3D dose export + CT/dose overlay (no recompute on display)
+- [x] RT Plan DICOM export button (uses ECHO template plan)
 
 ---
 
