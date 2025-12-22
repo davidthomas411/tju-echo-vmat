@@ -32,6 +32,8 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 RUNS_DIR_COMPRESS = Path(__file__).resolve().parent / "runs-compressrtp"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 RUNS_DIR_COMPRESS.mkdir(parents=True, exist_ok=True)
+BATCH_DIR = Path(__file__).resolve().parent / "runs-batches"
+BATCH_DIR.mkdir(parents=True, exist_ok=True)
 WORKBENCH_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = WORKBENCH_DIR / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -72,10 +74,21 @@ class RunRequest(BaseModel):
     rank: int = 5
     step: Optional[Literal["ddc", "sparse", "svd", "wavelet"]] = None
     beam_ids: Optional[list[int]] = None
+    tag: Optional[str] = None
 
 
 class RunResponse(BaseModel):
     run_id: str
+
+
+class BatchRequest(BaseModel):
+    runs: list[RunRequest]
+    label: Optional[str] = None
+
+
+class BatchResponse(BaseModel):
+    batch_id: str
+    run_ids: list[str]
 
 
 app = FastAPI()
@@ -106,6 +119,21 @@ def _read_json(path: Path) -> dict:
 
 def _run_roots() -> dict[str, Path]:
     return {"echo-vmat": RUNS_DIR, "compressrtp": RUNS_DIR_COMPRESS}
+
+
+def _batch_path(batch_id: str) -> Path:
+    return BATCH_DIR / f"{batch_id}.json"
+
+
+def _write_batch_status(batch_id: str, payload: dict) -> None:
+    _write_json(_batch_path(batch_id), payload)
+
+
+def _read_batch_status(batch_id: str) -> dict:
+    path = _batch_path(batch_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="batch not found")
+    return _read_json(path)
 
 
 def _find_run_dir(run_id: str) -> Path:
@@ -496,7 +524,12 @@ def _write_rt_struct_dicom(
         ds.RTROIObservationsSequence.append(obs)
         roi_number += 1
     ds.save_as(str(rt_path), write_like_original=False)
-    return {"status": "created", "artifact": str(rt_path), "ct_dir": str(ct_result.get("ct_dir"))}
+    return {
+        "status": "created",
+        "artifact": str(rt_path),
+        "rtstruct_path": str(rt_path),
+        "ct_dir": str(ct_result.get("ct_dir")),
+    }
 
 def _write_rt_dose_dicom(
     out_dir: Path,
@@ -511,11 +544,19 @@ def _write_rt_dose_dicom(
     if not dose_path.exists():
         raise HTTPException(status_code=404, detail="dose_3d.npy not found")
     meta_path = out_dir / "dose_3d_meta.json"
+    dose_arr = np.load(dose_path)
+    ct_meta, ct_path, dataset = _ct_reference(case_dir)
+    with h5py.File(ct_path, "r") as handle:
+        ct_shape = handle[dataset].shape
+    if tuple(dose_arr.shape) != tuple(ct_shape):
+        raise HTTPException(
+            status_code=400,
+            detail=f"dose_3d shape {dose_arr.shape} does not match CT shape {ct_shape}",
+        )
     if meta_path.exists():
         meta = _read_json(meta_path)
     else:
-        meta, _ct_path, _dataset = _ct_reference(case_dir)
-    dose_arr = np.load(dose_path)
+        meta = ct_meta
     z_slices, rows, cols = dose_arr.shape
     max_dose = float(np.max(dose_arr))
     max_pixel = np.iinfo(np.uint32).max
@@ -672,6 +713,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 step=req.step,
                 fast=req.fast,
                 super_fast=req.super_fast,
+                tag=req.tag,
                 adapter=adapter,
             )
         else:
@@ -684,10 +726,44 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 use_available_beams=use_available_beams,
                 force_sparse=force_sparse,
                 super_fast=req.super_fast,
+                tag=req.tag,
                 adapter=adapter,
             )
     except Exception as exc:
         _write_json(out_dir / "status.json", {"state": "error", "error": str(exc)})
+
+
+def _batch_worker(
+    batch_id: str, run_payloads: list[tuple[str, RunRequest, Path]], label: Optional[str]
+) -> None:
+    run_ids = [run_id for run_id, _req, _out_dir in run_payloads]
+    total = len(run_payloads)
+    for idx, (run_id, req, out_dir) in enumerate(run_payloads):
+        _write_batch_status(
+            batch_id,
+            {
+                "batch_id": batch_id,
+                "label": label,
+                "state": "running",
+                "current_index": idx,
+                "current_run_id": run_id,
+                "run_ids": run_ids,
+                "total": total,
+            },
+        )
+        _run_worker(run_id, req, out_dir)
+    _write_batch_status(
+        batch_id,
+        {
+            "batch_id": batch_id,
+            "label": label,
+            "state": "completed",
+            "current_index": total - 1 if total else None,
+            "current_run_id": run_ids[-1] if run_ids else None,
+            "run_ids": run_ids,
+            "total": total,
+        },
+    )
 
 
 @app.post("/runs", response_model=RunResponse)
@@ -695,11 +771,60 @@ def create_run(req: RunRequest) -> RunResponse:
     run_id = uuid4().hex
     out_dir = RUNS_DIR_COMPRESS / run_id if req.optimizer == "compressrtp" else RUNS_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(out_dir / "status.json", {"state": "queued"})
+    _write_json(
+        out_dir / "status.json",
+        {"state": "queued", "case_id": req.case_id, "tag": req.tag, "optimizer": req.optimizer},
+    )
 
     thread = threading.Thread(target=_run_worker, args=(run_id, req, out_dir), daemon=True)
     thread.start()
     return RunResponse(run_id=run_id)
+
+
+@app.post("/runs/batch", response_model=BatchResponse)
+def create_batch(req: BatchRequest) -> BatchResponse:
+    if not req.runs:
+        raise HTTPException(status_code=400, detail="Batch must include at least one run request")
+    batch_id = uuid4().hex
+    run_payloads: list[tuple[str, RunRequest, Path]] = []
+    run_ids: list[str] = []
+    for run_req in req.runs:
+        effective_tag = run_req.tag or req.label
+        if effective_tag != run_req.tag:
+            run_req = run_req.model_copy(update={"tag": effective_tag})
+        run_id = uuid4().hex
+        out_dir = RUNS_DIR_COMPRESS / run_id if run_req.optimizer == "compressrtp" else RUNS_DIR / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            out_dir / "status.json",
+            {"state": "queued", "case_id": run_req.case_id, "tag": run_req.tag, "optimizer": run_req.optimizer},
+        )
+        run_ids.append(run_id)
+        run_payloads.append((run_id, run_req, out_dir))
+    _write_batch_status(
+        batch_id,
+        {
+            "batch_id": batch_id,
+            "label": req.label,
+            "state": "queued",
+            "current_index": None,
+            "current_run_id": None,
+            "run_ids": run_ids,
+            "total": len(run_payloads),
+        },
+    )
+    thread = threading.Thread(
+        target=_batch_worker,
+        args=(batch_id, run_payloads, req.label),
+        daemon=True,
+    )
+    thread.start()
+    return BatchResponse(batch_id=batch_id, run_ids=run_ids)
+
+
+@app.get("/runs/batch/{batch_id}")
+def get_batch(batch_id: str) -> dict:
+    return _read_batch_status(batch_id)
 
 
 @app.get("/runs")
@@ -720,6 +845,7 @@ def list_runs() -> dict:
                     "run_type": config.get("optimizer", run_type),
                     "case_id": config.get("case_id"),
                     "protocol": config.get("protocol"),
+                    "tag": config.get("tag") or status.get("tag"),
                     "started_at": status.get("started_at"),
                     "timestamp": path.stat().st_mtime,
                 }
@@ -743,6 +869,7 @@ def get_run(run_id: str) -> dict:
         "run_type": config.get("optimizer", "echo-vmat"),
         "case_id": config.get("case_id"),
         "protocol": config.get("protocol"),
+        "tag": config.get("tag") or status.get("tag"),
     }
 
 
@@ -921,6 +1048,10 @@ def create_rt_plan(run_id: str, overwrite: bool = Query(False)) -> dict:
         "status": status,
         "artifact": rt_path.name,
         "dose_artifact": dose_payload.get("artifact"),
+        "rt_plan_path": str(rt_path),
+        "rt_dose_path": str(out_dir / dose_payload.get("artifact"))
+        if dose_payload.get("artifact")
+        else None,
     }
 
 

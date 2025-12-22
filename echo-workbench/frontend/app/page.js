@@ -11,7 +11,7 @@ const CASE_OPTIONS = [
 
 const PRESETS = [
   { id: "super_fast", label: "Super Fast" },
-  { id: "fast", label: "Fast" },
+  { id: "fast", label: "Safe (low memory)" },
   { id: "balanced", label: "Balanced" },
 ];
 
@@ -26,11 +26,20 @@ const COMPRESS_MODES = [
   { id: "wavelet", label: "Wavelet Smoothness" },
 ];
 
+const COMPRESS_STEPS = [
+  { id: "all", label: "Full Pipeline" },
+  { id: "ddc", label: "DDC Only" },
+  { id: "sparse", label: "Sparse Only" },
+  { id: "svd", label: "Sparse + Low Rank" },
+  { id: "wavelet", label: "Wavelet Basis" },
+];
+
 const STAGES = [
   { id: "dataset_download", label: "Dataset" },
   { id: "case_load", label: "Case Load" },
   { id: "beams", label: "Beam Setup" },
   { id: "ddc", label: "DDC" },
+  { id: "compress", label: "Compression" },
   { id: "optimization", label: "Optimization" },
   { id: "evaluation", label: "Evaluation" },
   { id: "complete", label: "Complete" },
@@ -39,10 +48,22 @@ const STAGES = [
 const TIMING_LABELS = [
   { key: "dataset_download_sec", label: "Dataset" },
   { key: "case_load_sec", label: "Case Load" },
+  { key: "beams_sec", label: "Beams" },
   { key: "ddc_load_sec", label: "DDC" },
+  { key: "compress_sec", label: "Compression" },
   { key: "optimization_sec", label: "Optimization" },
   { key: "evaluation_sec", label: "Evaluation" },
   { key: "total_sec", label: "Total" },
+];
+
+const RESOURCE_LABELS = [
+  { key: "max_rss_mb", label: "Peak RSS (MB)" },
+  { key: "case_load_rss_mb", label: "Case Load RSS (MB)" },
+  { key: "beams_rss_mb", label: "Beams RSS (MB)" },
+  { key: "ddc_rss_mb", label: "DDC RSS (MB)" },
+  { key: "compress_rss_mb", label: "Compression RSS (MB)" },
+  { key: "optimization_rss_mb", label: "Optimization RSS (MB)" },
+  { key: "evaluation_rss_mb", label: "Evaluation RSS (MB)" },
 ];
 
 const DVH_COLORS = [
@@ -65,6 +86,31 @@ function formatSeconds(value) {
     return "--";
   }
   return `${value.toFixed(2)} s`;
+}
+
+function formatDuration(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "--";
+  }
+  const total = Math.max(0, Math.round(value));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const rem = minutes % 60;
+    return `${hours}h ${rem}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function formatNumber(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "--";
+  }
+  return Number(value).toFixed(1);
 }
 
 function extractPlanValue(raw) {
@@ -455,9 +501,11 @@ export default function HomePage() {
   const [preset, setPreset] = useState("super_fast");
   const [optimizer, setOptimizer] = useState("echo-vmat");
   const [compressMode, setCompressMode] = useState("sparse-only");
+  const [compressStep, setCompressStep] = useState("all");
   const [thresholdPerc, setThresholdPerc] = useState(10);
   const [rank, setRank] = useState(5);
   const [beamCount, setBeamCount] = useState("");
+  const [tag, setTag] = useState("");
   const [availableRuns, setAvailableRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [runId, setRunId] = useState(null);
@@ -494,6 +542,11 @@ export default function HomePage() {
   const [doseStatus, setDoseStatus] = useState("idle");
   const [rtPlanStatus, setRtPlanStatus] = useState("idle");
   const [rtPlanFile, setRtPlanFile] = useState("");
+  const [rtDoseFile, setRtDoseFile] = useState("");
+  const [ctDicomStatus, setCtDicomStatus] = useState("idle");
+  const [ctDicomDir, setCtDicomDir] = useState("");
+  const [rtStructStatus, setRtStructStatus] = useState("idle");
+  const [rtStructPath, setRtStructPath] = useState("");
   const [error, setError] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const resultsLoaded = useRef(false);
@@ -541,6 +594,11 @@ export default function HomePage() {
     setDoseStatus("idle");
     setRtPlanStatus("idle");
     setRtPlanFile("");
+    setRtDoseFile("");
+    setCtDicomStatus("idle");
+    setCtDicomDir("");
+    setRtStructStatus("idle");
+    setRtStructPath("");
     resultsLoaded.current = false;
     setIsRunning(true);
     try {
@@ -555,11 +613,17 @@ export default function HomePage() {
         threshold_perc: thresholdPerc,
         rank,
       };
+      if (tag.trim()) {
+        payload.tag = tag.trim();
+      }
       if (optimizer === "compressrtp") {
         const parsedCount = Number.parseInt(String(beamCount).trim(), 10);
         if (Number.isFinite(parsedCount) && parsedCount > 0) {
           const capped = Math.min(parsedCount, 37);
           payload.beam_ids = Array.from({ length: capped }, (_, idx) => idx);
+        }
+        if (compressStep && compressStep !== "all") {
+          payload.step = compressStep;
         }
       }
       const response = await fetch(`${apiBase}/runs`, {
@@ -606,6 +670,11 @@ export default function HomePage() {
     setDoseStatus("idle");
     setRtPlanStatus("idle");
     setRtPlanFile("");
+    setRtDoseFile("");
+    setCtDicomStatus("idle");
+    setCtDicomDir("");
+    setRtStructStatus("idle");
+    setRtStructPath("");
     resultsLoaded.current = false;
     setRunId(runValue);
     setIsRunning(false);
@@ -657,6 +726,61 @@ export default function HomePage() {
     }
   }
 
+  async function createCtDicom() {
+    if (!runId) {
+      return;
+    }
+    setCtDicomStatus("creating");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/runs/${runId}/ct-dicom`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`CT DICOM export failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      if (payload.status === "created" || payload.status === "exists") {
+        setCtDicomStatus("ready");
+        setCtDicomDir(payload.ct_dir || "");
+      } else {
+        setCtDicomStatus("idle");
+      }
+    } catch (err) {
+      setCtDicomStatus("error");
+      setError(err.message || "Failed to export CT DICOM.");
+    }
+  }
+
+  async function createRtStruct() {
+    if (!runId) {
+      return;
+    }
+    setRtStructStatus("creating");
+    setError(null);
+    try {
+      const response = await fetch(`${apiBase}/runs/${runId}/rtstruct`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`RTSTRUCT export failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      if (payload.status === "created" || payload.status === "exists") {
+        setRtStructStatus("ready");
+        setRtStructPath(payload.artifact || "");
+        if (payload.ct_dir) {
+          setCtDicomDir(payload.ct_dir);
+        }
+      } else {
+        setRtStructStatus("idle");
+      }
+    } catch (err) {
+      setRtStructStatus("error");
+      setError(err.message || "Failed to export RTSTRUCT.");
+    }
+  }
+
   async function createRtPlan() {
     if (!runId) {
       return;
@@ -674,6 +798,9 @@ export default function HomePage() {
       if (payload.status === "created" || payload.status === "exists") {
         setRtPlanStatus("ready");
         setRtPlanFile(payload.artifact || "");
+        if (payload.dose_artifact) {
+          setRtDoseFile(payload.dose_artifact);
+        }
       } else {
         setRtPlanStatus("idle");
       }
@@ -864,14 +991,19 @@ export default function HomePage() {
 
   useEffect(() => {
     const planName = artifacts.find((name) => name.endsWith(".dcm") && name.startsWith("rt_plan_"));
+    const doseName = artifacts.find((name) => name.endsWith(".dcm") && name.startsWith("rt_dose_"));
     if (planName) {
       setRtPlanStatus("ready");
       setRtPlanFile(planName);
+      if (doseName) {
+        setRtDoseFile(doseName);
+      }
       return;
     }
     if (rtPlanStatus === "ready") {
       setRtPlanStatus("idle");
       setRtPlanFile("");
+      setRtDoseFile("");
     }
   }, [artifacts, rtPlanStatus]);
 
@@ -968,12 +1100,36 @@ export default function HomePage() {
   }, [doseMeta, doseMax, dvhSeries]);
 
   const stageStatus = useMemo(() => {
-    const seen = new Set(events.map((event) => event.stage));
-    return STAGES.map((stage) => ({
-      ...stage,
-      done: seen.has(stage.id),
-    }));
-  }, [events]);
+    const stageMap = new Map();
+    events.forEach((event) => {
+      if (!event.stage) {
+        return;
+      }
+      const info = stageMap.get(event.stage) || { done: false, active: false, duration_sec: null };
+      const state = event.data?.state;
+      if (state === "start") {
+        info.active = true;
+      }
+      if (state === "done") {
+        info.done = true;
+        info.active = false;
+        if (Number.isFinite(event.data?.duration_sec)) {
+          info.duration_sec = event.data.duration_sec;
+        }
+      }
+      stageMap.set(event.stage, info);
+    });
+    const activeStage = status?.stage;
+    return STAGES.map((stage) => {
+      const info = stageMap.get(stage.id) || {};
+      return {
+        ...stage,
+        done: Boolean(info.done),
+        active: Boolean(info.active || (activeStage && activeStage === stage.id)),
+        duration_sec: info.duration_sec ?? null,
+      };
+    });
+  }, [events, status]);
 
   const metricsDisplay = useMemo(() => {
     return metrics.map((row) => {
@@ -993,6 +1149,9 @@ export default function HomePage() {
       : [];
 
   const lastEvent = events[events.length - 1];
+  const activeStageLabel = status?.stage || lastEvent?.stage || "--";
+  const elapsedLabel = formatDuration(status?.elapsed_sec);
+  const rssLabel = status?.rss_mb ? `${Number(status.rss_mb).toFixed(1)} MB` : "--";
   const sliceCount = ctMeta?.slice_count || 0;
   const sliceMax = sliceCount > 0 ? sliceCount - 1 : 0;
   const doseReady = doseStatus === "ready";
@@ -1061,6 +1220,11 @@ export default function HomePage() {
           <span className={`status-pill ${status?.state === "error" ? "error" : ""}`}>
             {status?.state || "idle"}
           </span>
+          <div className="status-meta">
+            <span>Stage: {activeStageLabel}</span>
+            <span>Elapsed: {elapsedLabel}</span>
+            <span>RSS: {rssLabel}</span>
+          </div>
           <button className="btn btn-ghost" onClick={() => loadRun(selectedRunId)}>
             Load Run
           </button>
@@ -1077,30 +1241,6 @@ export default function HomePage() {
               <div>
                 <div className="card-title">CT Viewer (Axial)</div>
                 <div className="card-subtitle">Slice navigation + window/level</div>
-              </div>
-              <div className="header-actions">
-                <button
-                  className="btn"
-                  onClick={createDose3d}
-                  disabled={!runId || doseReady || doseStatus === "creating"}
-                >
-                  {doseReady
-                    ? "3D Dose Ready"
-                    : doseStatus === "creating"
-                      ? "Creating Dose..."
-                      : "Create 3D Dose"}
-                </button>
-                <button
-                  className="btn"
-                  onClick={createRtPlan}
-                  disabled={!runId || rtPlanStatus === "creating"}
-                >
-                  {rtPlanStatus === "ready"
-                    ? "RT Plan Ready"
-                    : rtPlanStatus === "creating"
-                      ? "Generating RT Plan..."
-                      : "Generate RT Plan"}
-                </button>
               </div>
             </div>
             {ctMeta ? (
@@ -1293,6 +1433,83 @@ export default function HomePage() {
           <div className="card">
             <div className="card-header">
               <div>
+                <div className="card-title">DICOM Exports</div>
+                <div className="card-subtitle">CT/RTSTRUCT + RTPLAN/RTDOSE</div>
+              </div>
+              <div className="header-actions">
+                <button
+                  className="btn"
+                  onClick={createCtDicom}
+                  disabled={!runId || ctDicomStatus === "creating"}
+                >
+                  {ctDicomStatus === "ready"
+                    ? "CT DICOM Ready"
+                    : ctDicomStatus === "creating"
+                      ? "Exporting CT..."
+                      : "Export CT DICOM"}
+                </button>
+                <button
+                  className="btn"
+                  onClick={createRtStruct}
+                  disabled={!runId || rtStructStatus === "creating"}
+                >
+                  {rtStructStatus === "ready"
+                    ? "RTSTRUCT Ready"
+                    : rtStructStatus === "creating"
+                      ? "Exporting RTSTRUCT..."
+                      : "Export RTSTRUCT"}
+                </button>
+              </div>
+            </div>
+            <div className="export-grid">
+              <div>
+                <div className="export-label">3D Dose Grid</div>
+                <div className="export-value">
+                  {doseReady ? "dose_3d.npy" : "Not generated"}
+                </div>
+                <button
+                  className="btn btn-ghost"
+                  onClick={createDose3d}
+                  disabled={!runId || doseReady || doseStatus === "creating"}
+                >
+                  {doseReady
+                    ? "Dose Ready"
+                    : doseStatus === "creating"
+                      ? "Creating Dose..."
+                      : "Create 3D Dose"}
+                </button>
+              </div>
+              <div>
+                <div className="export-label">RT Plan + RT Dose</div>
+                <div className="export-value">
+                  {rtPlanFile ? `${rtPlanFile}${rtDoseFile ? ` + ${rtDoseFile}` : ""}` : "Not generated"}
+                </div>
+                <button
+                  className="btn btn-ghost"
+                  onClick={createRtPlan}
+                  disabled={!runId || rtPlanStatus === "creating"}
+                >
+                  {rtPlanStatus === "ready"
+                    ? "RT Plan Ready"
+                    : rtPlanStatus === "creating"
+                      ? "Generating RT Plan..."
+                      : "Generate RT Plan"}
+                </button>
+              </div>
+            </div>
+            {ctDicomDir ? (
+              <div className="card-subtitle" style={{ marginTop: "8px" }}>
+                CT DICOM: {ctDicomDir}
+              </div>
+            ) : null}
+            {rtStructPath ? (
+              <div className="card-subtitle">RTSTRUCT: {rtStructPath}</div>
+            ) : null}
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
                 <div className="card-title">Run Queue</div>
                 <div className="card-subtitle">Latest runs (newest first)</div>
               </div>
@@ -1307,7 +1524,10 @@ export default function HomePage() {
                   >
                     <div className="run-id">{run.run_id}</div>
                     <div className="run-meta">
-                      <span>{run.case_id || run.status?.case_id || "unknown"}</span>
+                      <span>
+                        {run.tag ? `${run.tag} · ` : ""}
+                        {run.case_id || run.status?.case_id || "unknown"}
+                      </span>
                       <span>{run.run_type || "echo-vmat"} · {run.status?.state || "unknown"}</span>
                     </div>
                   </div>
@@ -1352,6 +1572,21 @@ export default function HomePage() {
                       </option>
                     ))}
                   </select>
+                  <label htmlFor="compress-step">Pipeline Step</label>
+                  <select
+                    id="compress-step"
+                    value={compressStep}
+                    onChange={(event) => setCompressStep(event.target.value)}
+                  >
+                    {COMPRESS_STEPS.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <div style={{ color: "#94a3b8", fontSize: "12px" }}>
+                    Use DDC only for fast validation runs.
+                  </div>
                   <label htmlFor="threshold-perc">Threshold %</label>
                   <input
                     id="threshold-perc"
@@ -1407,6 +1642,13 @@ export default function HomePage() {
                 value={protocol}
                 onChange={(event) => setProtocol(event.target.value)}
               />
+              <label htmlFor="run-tag">Tag</label>
+              <input
+                id="run-tag"
+                placeholder="Optional label"
+                value={tag}
+                onChange={(event) => setTag(event.target.value)}
+              />
               <label htmlFor="preset">Preset</label>
               <select id="preset" value={preset} onChange={(event) => setPreset(event.target.value)}>
                 {PRESETS.map((option) => (
@@ -1424,7 +1666,8 @@ export default function HomePage() {
                 <option value="">Select a run</option>
                 {availableRuns.map((run) => (
                   <option key={run.run_id} value={run.run_id}>
-                    {run.run_id} ({run.run_type || "echo-vmat"} · {run.status?.state || "unknown"})
+                    {run.run_id} ({run.run_type || "echo-vmat"} · {run.status?.state || "unknown"}
+                    {run.tag ? ` · ${run.tag}` : ""})
                   </option>
                 ))}
               </select>
@@ -1442,12 +1685,23 @@ export default function HomePage() {
               </div>
             </div>
             <ul className="progress-list">
-              {stageStatus.map((stage) => (
-                <li key={stage.id} className={`progress-item ${stage.done ? "done" : ""}`}>
-                  <span>{stage.label}</span>
-                  <span>{stage.done ? "done" : "pending"}</span>
-                </li>
-              ))}
+              {stageStatus.map((stage) => {
+                let statusText = "pending";
+                if (stage.done) {
+                  statusText = stage.duration_sec ? formatDuration(stage.duration_sec) : "done";
+                } else if (stage.active) {
+                  statusText = "active";
+                }
+                return (
+                  <li
+                    key={stage.id}
+                    className={`progress-item ${stage.done ? "done" : ""} ${stage.active ? "active" : ""}`}
+                  >
+                    <span>{stage.label}</span>
+                    <span>{statusText}</span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </section>
@@ -1521,7 +1775,7 @@ export default function HomePage() {
                   <option value="">Select run</option>
                   {availableRuns.map((run) => (
                     <option key={`a-${run.run_id}`} value={run.run_id}>
-                      {run.run_id} ({run.run_type || "echo-vmat"})
+                      {run.run_id} ({run.run_type || "echo-vmat"}{run.tag ? ` · ${run.tag}` : ""})
                     </option>
                   ))}
                 </select>
@@ -1536,7 +1790,7 @@ export default function HomePage() {
                   <option value="">Select run</option>
                   {availableRuns.map((run) => (
                     <option key={`b-${run.run_id}`} value={run.run_id}>
-                      {run.run_id} ({run.run_type || "echo-vmat"})
+                      {run.run_id} ({run.run_type || "echo-vmat"}{run.tag ? ` · ${run.tag}` : ""})
                     </option>
                   ))}
                 </select>
@@ -1601,6 +1855,23 @@ export default function HomePage() {
                 <div className="kpi" key={item.key}>
                   <div className="label">{item.label}</div>
                   <div className="value">{formatSeconds(timing?.[item.key])}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <div className="card-title">Resource Summary</div>
+                <div className="card-subtitle">Peak memory per stage</div>
+              </div>
+            </div>
+            <div className="kpi-grid">
+              {RESOURCE_LABELS.map((item) => (
+                <div className="kpi" key={item.key}>
+                  <div className="label">{item.label}</div>
+                  <div className="value">{formatNumber(timing?.[item.key])}</div>
                 </div>
               ))}
             </div>

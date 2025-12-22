@@ -63,7 +63,7 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] UI refreshed to an enterprise-style console layout with live trace chart + run queue
 - [x] Interactive DVH plot (hover values, percent axes, focus filter)
 - [x] Run comparison (overlay DVHs + metric delta table)
-- [x] CT viewer with window/level + wheel navigation
+- [x] CT viewer with window/level + wheel navigation (square viewport)
 - [x] Structure overlay (CT axial outlines)
 - [x] Optional 3D dose export + CT/dose overlay (no recompute on display)
 - [x] RT Plan DICOM export button (uses ECHO template plan)
@@ -71,6 +71,10 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] UI optimizer selector with CompressRTP modes (sparse-only, sparse+low-rank, wavelet)
 - [x] CompressRTP artifacts (metrics/DVH/plan/solution) saved under `runs-compressrtp/`
 - [x] CompressRTP integration tests (3 modes) pass on Lung_Patient_11
+- [x] CompressRTP step diagnostics in UI (DDC-only, sparse, svd, wavelet)
+- [x] Run tagging supported in backend + UI run lists
+- [x] Stage-aware status + elapsed time + RSS sampling for profiling
+- [x] DICOM exports panel (CT/RTSTRUCT + RTPLAN/RTDOSE) with deterministic paths
 
 ---
 
@@ -377,7 +381,12 @@ This establishes a **credible, extensible foundation** for future Eclipse‑inte
 
 ## 14. Big Project List (Backlog)
 
-- [ ] Optimization: profile full‑resolution runs (peak RAM + time), tighten sparse DDC usage, and document best‑fit presets
-- [ ] GPU feasibility study: dose engine + influence matrix on GPU; assess solver alternatives for conic optimization
-- [ ] ESAPI adapter (Eclipse case + dose export)
-- [ ] Multi‑run orchestration (batch queue + compare dashboard)
+- [~] Optimization: profile full‑resolution runs (peak RAM + time), tighten sparse DDC usage, and document best‑fit presets
+  - Added `max_rss_mb` sampling + UI resource summary
+  - Added `docs/optimization_profiling.md` checklist
+- [~] GPU feasibility study: dose engine + influence matrix on GPU; assess solver alternatives for conic optimization
+  - Added `docs/gpu_feasibility.md` with GPU plan + tests (CompressRTP-focused)
+- [~] ESAPI adapter (Eclipse case + dose export)
+  - Stub `EsapiAdapter` added; integration still pending
+- [~] Multi‑run orchestration (batch queue + compare dashboard)
+  - Added backend batch endpoint (`/runs/batch` + status)

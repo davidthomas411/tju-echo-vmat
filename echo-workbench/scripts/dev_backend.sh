@@ -12,6 +12,7 @@ fi
 export PYTHONPATH="${ROOT_DIR}"
 
 "${VENV_PY}" -m uvicorn backend.main:app --reload \
+  --no-access-log \
   --reload-dir "${ROOT_DIR}/backend" \
   --reload-exclude '**/runs*' \
   --reload-exclude '**/PortPy/**' \

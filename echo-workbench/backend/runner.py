@@ -47,6 +47,11 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, handle, indent=2)
 
 
+def _read_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 def _append_jsonl(path: Path, payload: dict) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload))
@@ -65,6 +70,17 @@ def _log_event(out_dir: Path, stage: str, message: str, level: str = "info", dat
     _append_jsonl(out_dir / "events.jsonl", event)
     with (out_dir / "logs.txt").open("a", encoding="utf-8") as handle:
         handle.write(f"[{event['ts']}] {level.upper()} {stage}: {message}\n")
+
+
+def _rss_mb() -> float | None:
+    try:
+        import resource
+    except ImportError:
+        return None
+    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if rss_kb <= 0:
+        return None
+    return rss_kb / 1024.0
 
 
 def _start_heartbeat(
@@ -101,6 +117,13 @@ def _emit_trace(out_dir: Path, sol_convergence: list[dict], step_label: str) -> 
 
 def _update_status(out_dir: Path, payload: dict) -> None:
     _write_json(out_dir / "status.json", payload)
+
+
+def _merge_status(out_dir: Path, payload: dict) -> None:
+    status_path = out_dir / "status.json"
+    status = _read_json(status_path) if status_path.exists() else {}
+    status.update(payload)
+    _write_json(status_path, status)
 
 
 def _normalize_data_dir(data_dir: Path, case_id: str) -> Path:
@@ -205,6 +228,7 @@ def run_echo_example(
     use_available_beams: bool = False,
     force_sparse: bool = False,
     super_fast: bool = False,
+    tag: str | None = None,
     adapter=None,
 ) -> Path:
     _ensure_echo_vmat_on_path()
@@ -242,6 +266,8 @@ def run_echo_example(
         "adapter": case_info.source,
         "dataset_download_sec": float(case_info.download_seconds),
     }
+    if tag:
+        run_config["tag"] = tag
     _write_json(out_dir / "config.json", run_config)
     started_at = _now_iso()
     _update_status(
@@ -255,6 +281,38 @@ def run_echo_example(
     )
     _log_event(out_dir, "start", "Run started")
 
+    run_start = time.perf_counter()
+    stage_starts: dict[str, float] = {}
+    rss_samples: list[float] = []
+
+    def _stage_begin(stage: str, message: str | None = None) -> None:
+        stage_starts[stage] = time.perf_counter()
+        elapsed = stage_starts[stage] - run_start
+        rss_mb = _rss_mb()
+        if rss_mb is not None:
+            rss_samples.append(rss_mb)
+        _merge_status(out_dir, {"stage": stage, "elapsed_sec": elapsed, "rss_mb": rss_mb})
+        _log_event(
+            out_dir,
+            stage,
+            message or f"{stage} started",
+            data={"state": "start", "elapsed_sec": elapsed, "rss_mb": rss_mb},
+        )
+
+    def _stage_end(stage: str, message: str, extra: dict | None = None) -> float:
+        end = time.perf_counter()
+        start = stage_starts.get(stage, end)
+        elapsed = end - run_start
+        duration = end - start
+        rss_mb = _rss_mb()
+        if rss_mb is not None:
+            rss_samples.append(rss_mb)
+        data = {"state": "done", "elapsed_sec": elapsed, "duration_sec": duration, "rss_mb": rss_mb}
+        if extra:
+            data.update(extra)
+        _log_event(out_dir, stage, message, data=data)
+        return duration
+
     # Match the official example flow as closely as possible.
     tic_all = time.time()
     t_total_start = time.perf_counter()
@@ -263,6 +321,14 @@ def run_echo_example(
     }
     if case_info.download_seconds:
         _log_event(out_dir, "dataset_download", f"Downloaded dataset in {case_info.download_seconds:.2f}s")
+    else:
+        _log_event(
+            out_dir,
+            "dataset_download",
+            "Dataset already available",
+            data={"state": "done", "duration_sec": 0.0},
+        )
+    _stage_begin("case_load", "Loading case data")
     t_case_start = time.perf_counter()
     data = pp.DataExplorer(data_dir=str(data_dir))
     data.patient_id = case_id
@@ -298,8 +364,7 @@ def run_echo_example(
     _write_json(out_dir / "config.json", run_config)
 
     structs = pp.Structures(data)
-    timing["case_load_sec"] = time.perf_counter() - t_case_start
-    _log_event(out_dir, "case_load", f"Loaded case data in {timing['case_load_sec']:.2f}s")
+    _stage_begin("beams", "Selecting beams")
     beam_ids = None
     if use_planner_beams:
         beam_ids = _load_planner_beam_ids(patient_dir)
@@ -323,6 +388,12 @@ def run_echo_example(
     }
     beam_ids = [beam_id for arc in arcs_dict["arcs"] for beam_id in arc["beam_ids"]]
     beams = pp.Beams(data, beam_ids=beam_ids, load_inf_matrix_full=flag_full_matrix)
+    timing["beams_sec"] = _stage_end(
+        "beams",
+        f"Beam setup complete ({len(beam_ids)} beams)",
+        extra={"beam_count": len(beam_ids)},
+    )
+    timing["beams_rss_mb"] = _rss_mb()
 
     if "Patient Surface" in structs.get_structures():
         ind = structs.structures_dict["name"].index("Patient Surface")
@@ -336,9 +407,19 @@ def run_echo_example(
             opt_params=vmat_opt_params["steps"][str(i + 1)],
             clinical_criteria=clinical_criteria,
         )
+    timing["case_load_sec"] = _stage_end(
+        "case_load",
+        f"Loaded case data in {time.perf_counter() - t_case_start:.2f}s",
+    )
+    timing["case_load_rss_mb"] = _rss_mb()
 
+    _stage_begin("ddc", "Building influence matrix (this can take several minutes)")
     t_ddc_start = time.perf_counter()
-    inf_matrix = pp.InfluenceMatrix(structs=structs, beams=beams, is_full=flag_full_matrix)
+    heartbeat = _start_heartbeat(out_dir, "ddc", "Influence matrix build in progress")
+    try:
+        inf_matrix = pp.InfluenceMatrix(structs=structs, beams=beams, is_full=flag_full_matrix)
+    finally:
+        heartbeat.set()
     _ensure_voxel_coordinates(inf_matrix)
 
     if flag_full_matrix:
@@ -348,7 +429,8 @@ def run_echo_example(
         B = get_sparse_only(A, threshold_perc=threshold_perc, compression=sparsification)
         inf_matrix.A = B
     timing["ddc_load_sec"] = time.perf_counter() - t_ddc_start
-    _log_event(out_dir, "ddc", f"Influence matrix ready in {timing['ddc_load_sec']:.2f}s")
+    timing["ddc_rss_mb"] = _rss_mb()
+    _stage_end("ddc", f"Influence matrix ready in {timing['ddc_load_sec']:.2f}s")
 
     inf_matrix_scale_factor = vmat_opt_params["opt_parameters"].get("inf_matrix_scale_factor", 1)
     print("inf_matrix_scale_factor: ", inf_matrix_scale_factor)
@@ -363,6 +445,7 @@ def run_echo_example(
         arcs=arcs,
     )
 
+    _stage_begin("optimization", "Running optimization")
     t_opt_start = time.perf_counter()
     opt_detail: dict[str, float] = {}
     if vmat_opt_params["opt_parameters"]["initial_leaf_pos"].lower() == "cg":
@@ -425,7 +508,8 @@ def run_echo_example(
 
     timing["optimization_sec"] = time.perf_counter() - t_opt_start
     timing["optimization_detail"] = opt_detail
-    _log_event(out_dir, "optimization", f"Optimization finished in {timing['optimization_sec']:.2f}s")
+    timing["optimization_rss_mb"] = _rss_mb()
+    _stage_end("optimization", f"Optimization finished in {timing['optimization_sec']:.2f}s")
 
     fig, ax = plt.subplots(figsize=(12, 8))
     struct_names = [
@@ -477,6 +561,7 @@ def run_echo_example(
 
     timing["correction_sec"] = 0.0
 
+    _stage_begin("evaluation", "Evaluating plan metrics")
     t_eval_start = time.perf_counter()
     dose_1d = solutions[-1]["act_dose_v"] * my_plan.get_num_of_fractions()
     metrics_df = Evaluation.display_clinical_criteria(
@@ -544,7 +629,8 @@ def run_echo_example(
         }
     _write_json(out_dir / "dvh.json", dvh)
     timing["evaluation_sec"] = time.perf_counter() - t_eval_start
-    _log_event(out_dir, "evaluation", f"Evaluation finished in {timing['evaluation_sec']:.2f}s")
+    timing["evaluation_rss_mb"] = _rss_mb()
+    _stage_end("evaluation", f"Evaluation finished in {timing['evaluation_sec']:.2f}s")
 
     print("saving optimal solution..")
     for i in range(len(solutions)):
@@ -558,13 +644,20 @@ def run_echo_example(
     print("***************** opt_time (secs) ********************:", opt_time)
     timing["total_sec"] = time.perf_counter() - t_total_start
     timing["opt_time_sec"] = opt_time
+    if rss_samples:
+        timing["max_rss_mb"] = max(rss_samples)
     _write_json(out_dir / "timing.json", timing)
+    elapsed_total = time.perf_counter() - run_start
+    rss_mb = _rss_mb()
     _update_status(
         out_dir,
         {
             "state": "completed",
+            "stage": "complete",
             "started_at": started_at,
             "ended_at": _now_iso(),
+            "elapsed_sec": elapsed_total,
+            "rss_mb": rss_mb,
             "case_id": case_id,
             "protocol": protocol_name,
         },
@@ -588,6 +681,7 @@ def run_compressrtp(
     step: str | None = None,
     fast: bool = False,
     super_fast: bool = False,
+    tag: str | None = None,
     adapter=None,
 ) -> Path:
     _ensure_compressrtp_on_path()
@@ -638,6 +732,8 @@ def run_compressrtp(
         "adapter": case_info.source,
         "dataset_download_sec": float(case_info.download_seconds),
     }
+    if tag:
+        run_config["tag"] = tag
     if beam_ids_override:
         run_config["beam_ids_override"] = beam_ids_override
     _write_json(out_dir / "config.json", run_config)
@@ -654,6 +750,38 @@ def run_compressrtp(
     )
     _log_event(out_dir, "start", "CompressRTP run started")
 
+    run_start = time.perf_counter()
+    stage_starts: dict[str, float] = {}
+    rss_samples: list[float] = []
+
+    def _stage_begin(stage: str, message: str | None = None) -> None:
+        stage_starts[stage] = time.perf_counter()
+        elapsed = stage_starts[stage] - run_start
+        rss_mb = _rss_mb()
+        if rss_mb is not None:
+            rss_samples.append(rss_mb)
+        _merge_status(out_dir, {"stage": stage, "elapsed_sec": elapsed, "rss_mb": rss_mb})
+        _log_event(
+            out_dir,
+            stage,
+            message or f"{stage} started",
+            data={"state": "start", "elapsed_sec": elapsed, "rss_mb": rss_mb},
+        )
+
+    def _stage_end(stage: str, message: str, extra: dict | None = None) -> float:
+        end = time.perf_counter()
+        start = stage_starts.get(stage, end)
+        elapsed = end - run_start
+        duration = end - start
+        rss_mb = _rss_mb()
+        if rss_mb is not None:
+            rss_samples.append(rss_mb)
+        data = {"state": "done", "elapsed_sec": elapsed, "duration_sec": duration, "rss_mb": rss_mb}
+        if extra:
+            data.update(extra)
+        _log_event(out_dir, stage, message, data=data)
+        return duration
+
     tic_all = time.time()
     t_total_start = time.perf_counter()
     timing: dict[str, float | dict] = {
@@ -665,13 +793,20 @@ def run_compressrtp(
         timing["step"] = step_name
         if info:
             timing["step_info"] = info
+        if rss_samples:
+            timing["max_rss_mb"] = max(rss_samples)
         _write_json(out_dir / "timing.json", timing)
-        _update_status(
+        elapsed_total = time.perf_counter() - run_start
+        rss_mb = _rss_mb()
+        _merge_status(
             out_dir,
             {
                 "state": "completed",
+                "stage": step_name,
                 "started_at": started_at,
                 "ended_at": _now_iso(),
+                "elapsed_sec": elapsed_total,
+                "rss_mb": rss_mb,
                 "case_id": case_id,
                 "protocol": protocol_name,
                 "optimizer": "compressrtp",
@@ -683,6 +818,7 @@ def run_compressrtp(
     if case_info.download_seconds:
         _log_event(out_dir, "dataset_download", f"Downloaded dataset in {case_info.download_seconds:.2f}s")
 
+    _stage_begin("case_load", "Loading case data")
     t_case_start = time.perf_counter()
     data = pp.DataExplorer(data_dir=str(data_dir))
     data.patient_id = case_id
@@ -692,8 +828,10 @@ def run_compressrtp(
     opt_params = data.load_config_opt_params(protocol_name=protocol_name)
     structs.create_opt_structures(opt_params=opt_params, clinical_criteria=clinical_criteria)
     timing["case_load_sec"] = time.perf_counter() - t_case_start
-    _log_event(out_dir, "case_load", f"Loaded case data in {timing['case_load_sec']:.2f}s")
+    timing["case_load_rss_mb"] = _rss_mb()
+    _stage_end("case_load", f"Loaded case data in {timing['case_load_sec']:.2f}s")
 
+    _stage_begin("beams", "Selecting beams")
     beam_ids = None
     if beam_ids_override is not None:
         beam_ids = beam_ids_override
@@ -711,16 +849,23 @@ def run_compressrtp(
     else:
         beams = pp.Beams(data, load_inf_matrix_full=True)
         _log_event(out_dir, "beams", "Using planner beams (default)")
+    timing["beams_sec"] = _stage_end(
+        "beams",
+        f"Beam setup complete ({len(beam_ids) if beam_ids else beams.get_num_beams()} beams)",
+        extra={"beam_count": len(beam_ids) if beam_ids else beams.get_num_beams()},
+    )
+    timing["beams_rss_mb"] = _rss_mb()
 
+    _stage_begin("ddc", "Building influence matrix (this can take several minutes)")
     t_ddc_start = time.perf_counter()
-    _log_event(out_dir, "ddc", "Building influence matrix (this can take several minutes)")
     heartbeat = _start_heartbeat(out_dir, "ddc", "Influence matrix build in progress", 60.0)
     try:
         inf_matrix = pp.InfluenceMatrix(ct=ct, structs=structs, beams=beams, is_full=True)
     finally:
         heartbeat.set()
     timing["ddc_load_sec"] = time.perf_counter() - t_ddc_start
-    _log_event(out_dir, "ddc", f"Influence matrix ready in {timing['ddc_load_sec']:.2f}s")
+    timing["ddc_rss_mb"] = _rss_mb()
+    _stage_end("ddc", f"Influence matrix ready in {timing['ddc_load_sec']:.2f}s")
     if step == "ddc":
         info = _matrix_info(inf_matrix.A)
         _log_event(out_dir, "ddc", "DDC matrix ready", data=info)
@@ -736,10 +881,12 @@ def run_compressrtp(
 
     num_fractions = clinical_criteria.get_num_of_fractions()
     A_full = inf_matrix.A
+    _stage_begin("compress", "Building compressed representation")
     if step == "sparse":
         S_sparse = get_sparse_only(A=A_full, threshold_perc=threshold_perc, compression="rmr")
         info = {"sparse": _matrix_info(S_sparse)}
-        _log_event(out_dir, "compress", "Sparse-only matrix built", data=info)
+        timing["compress_sec"] = _stage_end("compress", "Sparse-only matrix built", extra=info)
+        timing["compress_rss_mb"] = _rss_mb()
         return _finish_step("sparse", info)
     if step == "svd":
         S, H, W = get_sparse_plus_low_rank(A=A_full, threshold_perc=threshold_perc, rank=rank)
@@ -748,7 +895,8 @@ def run_compressrtp(
             "H_shape": list(H.shape),
             "W_shape": list(W.shape),
         }
-        _log_event(out_dir, "compress", "Sparse + low-rank factors built", data=info)
+        timing["compress_sec"] = _stage_end("compress", "Sparse + low-rank factors built", extra=info)
+        timing["compress_rss_mb"] = _rss_mb()
         return _finish_step("svd", info)
     if step == "wavelet":
         S_sparse = get_sparse_only(A=A_full, threshold_perc=threshold_perc, compression="rmr")
@@ -758,49 +906,65 @@ def run_compressrtp(
             "sparse": _matrix_info(S_sparse),
             "basis_shape": list(basis.shape),
         }
-        _log_event(out_dir, "compress", "Wavelet basis built", data=info)
+        timing["compress_sec"] = _stage_end("compress", "Wavelet basis built", extra=info)
+        timing["compress_rss_mb"] = _rss_mb()
         return _finish_step("wavelet", info)
 
-    t_opt_start = time.perf_counter()
-    sol = None
+    compress_info: dict | None = None
+    opt = None
+    solve_kwargs = {"solver": solver, "verbose": True}
     solver_trace = []
     if compress_mode == "sparse-only":
         S_sparse = get_sparse_only(A=A_full, threshold_perc=threshold_perc, compression="rmr")
+        compress_info = {"sparse": _matrix_info(S_sparse)}
         inf_matrix.A = S_sparse
         opt = pp.Optimization(my_plan, inf_matrix=inf_matrix, opt_params=opt_params)
         opt.create_cvxpy_problem()
-        sol = opt.solve(solver=solver, verbose=True)
-        dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
     elif compress_mode == "sparse-plus-low-rank":
         S, H, W = get_sparse_plus_low_rank(A=A_full, threshold_perc=threshold_perc, rank=rank)
+        compress_info = {
+            "sparse": _matrix_info(S),
+            "H_shape": list(H.shape),
+            "W_shape": list(W.shape),
+        }
         opt = CompressRTPOptimization(my_plan, opt_params=opt_params)
         opt.create_cvxpy_problem_compressed(S=S, H=H, W=W)
-        solve_kwargs = {"solver": solver, "verbose": True}
         if solver.upper() == "MOSEK":
             solve_kwargs["mosek_params"] = {
                 "MSK_IPAR_PRESOLVE_ELIMINATOR_MAX_NUM_TRIES": 0,
                 "MSK_IPAR_INTPNT_SCALING": "MSK_SCALING_NONE",
             }
-        sol = opt.solve(**solve_kwargs)
-        dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
     elif compress_mode == "wavelet":
         for obj in opt_params.get("objective_functions", []):
             if obj.get("type") == "smoothness-quadratic":
                 obj["weight"] = 0
         S_sparse = get_sparse_only(A=A_full, threshold_perc=threshold_perc, compression="rmr")
+        compress_info = {"sparse": _matrix_info(S_sparse)}
         inf_matrix.A = S_sparse
         opt = pp.Optimization(my_plan, inf_matrix=inf_matrix, opt_params=opt_params)
         opt.create_cvxpy_problem()
         wavelet_basis = get_low_dim_basis(inf_matrix=inf_matrix, compression="wavelet")
+        if compress_info is not None:
+            compress_info["basis_shape"] = list(wavelet_basis.shape)
         y = cp.Variable(wavelet_basis.shape[1])
         opt.constraints += [wavelet_basis @ y == opt.vars["x"]]
-        sol = opt.solve(solver=solver, verbose=True)
-        dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
     else:
         raise ValueError(f"Unknown compress_mode: {compress_mode}")
 
+    timing["compress_sec"] = _stage_end(
+        "compress",
+        "Compressed representation ready",
+        extra=compress_info,
+    )
+    timing["compress_rss_mb"] = _rss_mb()
+
+    _stage_begin("optimization", "Running optimization")
+    t_opt_start = time.perf_counter()
+    sol = opt.solve(**solve_kwargs)
+    dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
     timing["optimization_sec"] = time.perf_counter() - t_opt_start
-    _log_event(out_dir, "optimization", f"Optimization finished in {timing['optimization_sec']:.2f}s")
+    timing["optimization_rss_mb"] = _rss_mb()
+    _stage_end("optimization", f"Optimization finished in {timing['optimization_sec']:.2f}s")
     _write_json(out_dir / "solver_trace.json", solver_trace)
 
     t_eval_start = time.perf_counter()
@@ -876,7 +1040,8 @@ def run_compressrtp(
         }
     _write_json(out_dir / "dvh.json", dvh)
     timing["evaluation_sec"] = time.perf_counter() - t_eval_start
-    _log_event(out_dir, "evaluation", f"Evaluation finished in {timing['evaluation_sec']:.2f}s")
+    timing["evaluation_rss_mb"] = _rss_mb()
+    _stage_end("evaluation", f"Evaluation finished in {timing['evaluation_sec']:.2f}s")
 
     pp.save_optimal_sol(sol=sol, sol_name="sol_step1.pkl", path=str(out_dir))
     pp.save_plan(my_plan, "my_plan.pkl", path=str(out_dir))
@@ -884,13 +1049,20 @@ def run_compressrtp(
     opt_time = round(time.time() - tic_all, 2)
     timing["total_sec"] = time.perf_counter() - t_total_start
     timing["opt_time_sec"] = opt_time
+    if rss_samples:
+        timing["max_rss_mb"] = max(rss_samples)
     _write_json(out_dir / "timing.json", timing)
+    elapsed_total = time.perf_counter() - run_start
+    rss_mb = _rss_mb()
     _update_status(
         out_dir,
         {
             "state": "completed",
+            "stage": "complete",
             "started_at": started_at,
             "ended_at": _now_iso(),
+            "elapsed_sec": elapsed_total,
+            "rss_mb": rss_mb,
             "case_id": case_id,
             "protocol": protocol_name,
             "optimizer": "compressrtp",
@@ -927,6 +1099,7 @@ def main() -> None:
         choices=["all", "ddc", "sparse", "svd", "wavelet"],
         help="Stop after a CompressRTP pipeline step (for diagnostics).",
     )
+    parser.add_argument("--tag", default=None, help="Optional run tag for labeling.")
     parser.add_argument(
         "--beam-ids",
         default=None,
@@ -994,6 +1167,7 @@ def main() -> None:
         use_available_beams=use_available_beams,
         force_sparse=force_sparse,
         super_fast=super_fast,
+        tag=args.tag,
         adapter=adapter,
     ) if args.optimizer == "echo-vmat" else run_compressrtp(
         case_id=args.case_id,
@@ -1010,6 +1184,7 @@ def main() -> None:
         step=args.step,
         fast=args.fast,
         super_fast=super_fast,
+        tag=args.tag,
         adapter=adapter,
     )
 

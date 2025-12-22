@@ -5,5 +5,7 @@ huggingface_hub>=0.20.0
 numpy>=1.15
 h5py>=3.6.0
 Pillow>=8.0
+pydicom>=2.4.0
+scikit-image>=0.20.0
 PyWavelets>=1.4.0
 scikit-learn>=1.5.2

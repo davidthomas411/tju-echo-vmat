@@ -111,6 +111,17 @@ body {
   color: var(--bad);
 }
 
+.status-meta {
+  display: grid;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.status-meta span {
+  white-space: nowrap;
+}
+
 select,
 input {
   width: 100%;
@@ -243,6 +254,27 @@ label {
   font-weight: 600;
 }
 
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin-top: 6px;
+}
+
+.export-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.export-value {
+  margin: 6px 0 10px;
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-all;
+}
+
 .run-list {
   display: grid;
   gap: 10px;
@@ -297,6 +329,12 @@ label {
 .progress-item.done {
   border-color: rgba(74, 222, 128, 0.35);
   color: var(--good);
+}
+
+.progress-item.active {
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #dbeafe;
+  background: rgba(37, 99, 235, 0.12);
 }
 
 .console {
@@ -379,7 +417,8 @@ label {
 
 .ct-canvas {
   position: relative;
-  min-height: 260px;
+  aspect-ratio: 1 / 1;
+  width: 100%;
   border-radius: 12px;
   border: 1px solid var(--line);
   background: #05080f;

@@ -2,9 +2,6 @@
 ![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
 
 
-![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
-
-
 Local, research-only workbench for running ECHO-VMAT example patients, capturing plan quality (DVH + metrics), and timing the end-to-end optimization pipeline. The code wraps the official ECHO-VMAT example flow and avoids re-implementing solver logic.
 
 ## Current Status (Living Checklist)
@@ -20,7 +17,7 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 - [x] Next.js UI with run setup, live logs, DVH, and clinical metrics
 - [x] Interactive DVH plot (hover values, percent axes)
 - [x] Run comparison (overlay DVHs + metric deltas)
-- [x] CT viewer with window/level + wheel slice navigation
+- [x] CT viewer with window/level + wheel slice navigation (square viewport)
 - [x] Structure overlay (per-slice outlines)
 - [x] Optional 3D dose export + CT/dose color overlay
 - [x] RT Plan DICOM export (from ECHO template plan)
@@ -88,6 +85,7 @@ Faster dev server (limits watch scope, avoids large repo scan):
 ```
 /mnt/d/_PROJECTS/ECHO-VMAT_Project/echo-workbench/scripts/dev_backend.sh
 ```
+This script also disables access logs to keep errors visible.
 
 ### 6) Frontend UI
 ```
@@ -106,16 +104,24 @@ UI notes:
 - Click "Create 3D Dose" once to save `dose_3d.npy` for that run.
 - Toggle Dose Overlay in the CT viewer (fast, no recompute).
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
-- Use "Generate RT Plan" to export DICOM RT Plan + RT Dose for TPS import.
+- Use the DICOM Exports panel to generate CT/RTSTRUCT and RTPLAN/RTDOSE.
+- Add a run tag to label experiments and comparisons.
+- The "Safe (low memory)" preset uses planner beams + sparse matrix to reduce RAM.
+- Batch runs (sequential queue): POST `/runs/batch` and poll `/runs/batch/{batch_id}`.
 
 CompressRTP notes:
 - Select Optimizer = CompressRTP and choose a compression mode.
+- Use Pipeline Step = DDC Only for fast validation runs.
 - CompressRTP outputs are saved under `echo-workbench/backend/runs-compressrtp/<run_id>/`.
 - The UI lists both ECHO-VMAT and CompressRTP runs with type labels.
 Step diagnostics (CLI, stop after a stage):
 ```
 python echo-workbench/backend/runner.py --optimizer compressrtp --step ddc --beam-ids 0,1,2
 ```
+
+Profiling + GPU feasibility notes:
+- `docs/optimization_profiling.md`
+- `docs/gpu_feasibility.md`
 
 CT DICOM export (once per patient):
 ```
@@ -144,6 +150,8 @@ Key files:
 - `dose_3d.npy` + `dose_3d_meta.json` (optional, generated on demand)
 - `rt_plan_portpy_vmat.dcm` (optional, generated on demand)
 - `rt_dose_portpy_vmat.dcm` (optional, generated on demand)
+
+`timing.json` now includes stage durations (beams/compression) and peak RSS (`max_rss_mb`) for quick profiling.
 
 CT DICOM (generated once per patient) is saved under:
 ```
