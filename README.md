@@ -1,5 +1,9 @@
 # TJU ECHO-VMAT Workbench
 
+
+![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
+
+
 Local, research-only workbench for running ECHO-VMAT example patients, capturing plan quality (DVH + metrics), and timing the end-to-end optimization pipeline. The code wraps the official ECHO-VMAT example flow and avoids re-implementing solver logic.
 
 ## Current Status (Living Checklist)
@@ -89,8 +93,6 @@ UI notes:
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
 - Use "Generate RT Plan" to export DICOM RT Plan + RT Dose for TPS import.
 
-## UI Preview
-![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
 
 CT DICOM export (once per patient):
 ```
