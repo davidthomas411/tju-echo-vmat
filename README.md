@@ -19,6 +19,8 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 - [x] Structure overlay (per-slice outlines)
 - [x] Optional 3D dose export + CT/dose color overlay
 - [x] RT Plan DICOM export (from ECHO template plan)
+- [x] RT Dose DICOM export (per run)
+- [x] CT DICOM export (per patient, generated once)
 - [x] Standalone DVH + clinical criteria figure generator
 - [~] Full-resolution example run validated (fast mode ok; full-resolution still pending)
 - [ ] ESAPI adapter (future)
@@ -85,7 +87,19 @@ UI notes:
 - Click "Create 3D Dose" once to save `dose_3d.npy` for that run.
 - Toggle Dose Overlay in the CT viewer (fast, no recompute).
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
-- Use "Generate RT Plan" to export a DICOM RT Plan for TPS import.
+- Use "Generate RT Plan" to export DICOM RT Plan + RT Dose for TPS import.
+
+## UI Preview
+![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
+
+CT DICOM export (once per patient):
+```
+curl -X POST http://127.0.0.1:8000/runs/<run_id>/ct-dicom
+```
+RT Structure Set export (once per patient):
+```
+curl -X POST http://127.0.0.1:8000/runs/<run_id>/rtstruct
+```
 
 ## Artifacts Per Run
 All run outputs are saved under:
@@ -100,6 +114,16 @@ Key files:
 - `clinical_criteria.html` (shareable report)
 - `dose_3d.npy` + `dose_3d_meta.json` (optional, generated on demand)
 - `rt_plan_portpy_vmat.dcm` (optional, generated on demand)
+- `rt_dose_portpy_vmat.dcm` (optional, generated on demand)
+
+CT DICOM (generated once per patient) is saved under:
+```
+echo-workbench/data/processed/dicom/<case_id>/ct/
+```
+RT Structure Set DICOM (generated once per patient) is saved under:
+```
+echo-workbench/data/processed/dicom/<case_id>/rtstruct/rt_struct_portpy.dcm
+```
 
 ## Data Management
 - Raw data is expected under `echo-workbench/PortPy/data`.

@@ -1155,15 +1155,15 @@ export default function HomePage() {
                   <div className="ct-control-row">
                     <div className="ct-control">
                       <label htmlFor="dose-overlay">Dose Overlay</label>
-                      <select
+                      <button
                         id="dose-overlay"
-                        value={doseOverlay ? "on" : "off"}
-                        onChange={(event) => setDoseOverlay(event.target.value === "on")}
+                        type="button"
+                        className={`btn btn-toggle ${doseOverlay ? "active" : ""}`}
+                        onClick={() => setDoseOverlay((prev) => !prev)}
                         disabled={!artifacts.includes("dose_3d.npy")}
                       >
-                        <option value="off">Off</option>
-                        <option value="on">On</option>
-                      </select>
+                        {doseOverlay ? "Dose Overlay On" : "Dose Overlay Off"}
+                      </button>
                     </div>
                     <div className="ct-control">
                       <label htmlFor="dose-opacity">Opacity</label>
@@ -1182,15 +1182,15 @@ export default function HomePage() {
                   <div className="ct-control-row">
                     <div className="ct-control">
                       <label htmlFor="structure-overlay">Structure Overlay</label>
-                      <select
+                      <button
                         id="structure-overlay"
-                        value={structureOverlay ? "on" : "off"}
-                        onChange={(event) => setStructureOverlay(event.target.value === "on")}
+                        type="button"
+                        className={`btn btn-toggle ${structureOverlay ? "active" : ""}`}
+                        onClick={() => setStructureOverlay((prev) => !prev)}
                         disabled={!structures.length}
                       >
-                        <option value="off">Off</option>
-                        <option value="on">On</option>
-                      </select>
+                        {structureOverlay ? "Structure Overlay On" : "Structure Overlay Off"}
+                      </button>
                     </div>
                     <div className="ct-control">
                       <label htmlFor="structure-select">Structure</label>

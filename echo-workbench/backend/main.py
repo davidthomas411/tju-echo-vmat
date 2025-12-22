@@ -30,6 +30,11 @@ except ImportError:
 
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
+WORKBENCH_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = WORKBENCH_DIR / "data"
+PROCESSED_DIR = DATA_DIR / "processed"
+DICOM_DIR = PROCESSED_DIR / "dicom"
+DICOM_DIR.mkdir(parents=True, exist_ok=True)
 
 STRUCTURE_COLORS = [
     (96, 165, 250),
@@ -164,6 +169,402 @@ def _rt_plan_template(case_dir: Path) -> Path:
         return path
     raise HTTPException(status_code=404, detail="RT plan template DICOM not found")
 
+
+def _rt_dose_template(case_dir: Path) -> Path:
+    candidates = [
+        case_dir / "rt_dose_echo_vmat.dcm",
+        case_dir / "rt_dose_echo_imrt.dcm",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    for path in sorted(case_dir.glob("rt_dose*.dcm")):
+        return path
+    raise HTTPException(status_code=404, detail="RT dose template DICOM not found")
+
+
+def _dicom_reference(case_dir: Path) -> dict:
+    try:
+        from pydicom import dcmread
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"pydicom not available: {exc}") from exc
+    template_path = _rt_plan_template(case_dir)
+    ds = dcmread(str(template_path))
+    return {
+        "study_uid": getattr(ds, "StudyInstanceUID", None),
+        "frame_uid": getattr(ds, "FrameOfReferenceUID", None),
+        "patient_name": str(getattr(ds, "PatientName", "")) if hasattr(ds, "PatientName") else None,
+        "patient_id": getattr(ds, "PatientID", None),
+        "study_date": getattr(ds, "StudyDate", None),
+        "study_time": getattr(ds, "StudyTime", None),
+        "study_description": getattr(ds, "StudyDescription", None),
+    }
+
+
+def _ct_dicom_dir(case_id: str) -> Path:
+    return DICOM_DIR / case_id / "ct"
+
+
+def _rt_struct_dir(case_id: str) -> Path:
+    return DICOM_DIR / case_id / "rtstruct"
+
+
+def _update_dicom_uids(ds, series_uid: str, sop_uid: str) -> None:
+    ds.SeriesInstanceUID = series_uid
+    ds.SOPInstanceUID = sop_uid
+    if hasattr(ds, "file_meta"):
+        ds.file_meta.MediaStorageSOPInstanceUID = sop_uid
+
+
+def _write_ct_dicom(case_dir: Path, case_id: str, overwrite: bool = False) -> dict:
+    ct_dir = _ct_dicom_dir(case_id)
+    if ct_dir.exists() and not overwrite:
+        existing = sorted(ct_dir.glob("*.dcm"))
+        if existing:
+            return {"status": "exists", "ct_dir": str(ct_dir), "slices": len(existing)}
+    ct_dir.mkdir(parents=True, exist_ok=True)
+    if overwrite:
+        for path in ct_dir.glob("*.dcm"):
+            path.unlink()
+    meta, ct_path, dataset = _ct_reference(case_dir)
+    try:
+        from datetime import datetime
+        from pydicom.dataset import FileDataset, FileMetaDataset
+        from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"pydicom not available: {exc}") from exc
+    ref = _dicom_reference(case_dir)
+    study_uid = ref.get("study_uid") or generate_uid()
+    frame_uid = ref.get("frame_uid") or generate_uid()
+    patient_name = ref.get("patient_name") or case_id
+    patient_id = ref.get("patient_id") or case_id
+    study_date = ref.get("study_date") or datetime.utcnow().strftime("%Y%m%d")
+    study_time = ref.get("study_time") or datetime.utcnow().strftime("%H%M%S")
+    series_uid = generate_uid()
+    origin = meta.get("origin_xyz_mm", [0.0, 0.0, 0.0])
+    spacing = meta.get("resolution_xyz_mm", [1.0, 1.0, 1.0])
+    direction = meta.get("direction") or [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    orientation = [
+        float(direction[0]),
+        float(direction[1]),
+        float(direction[2]),
+        float(direction[3]),
+        float(direction[4]),
+        float(direction[5]),
+    ]
+    with h5py.File(ct_path, "r") as handle:
+        ct_data = handle[dataset]
+        z_slices, rows, cols = ct_data.shape
+        for z in range(z_slices):
+            slice_arr = np.asarray(ct_data[z, :, :], dtype=np.int16)
+            sop_uid = generate_uid()
+            file_meta = FileMetaDataset()
+            file_meta.MediaStorageSOPClassUID = CTImageStorage
+            file_meta.MediaStorageSOPInstanceUID = sop_uid
+            file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            file_meta.ImplementationClassUID = generate_uid()
+            file_path = ct_dir / f"ct_{z + 1:04d}.dcm"
+            ds = FileDataset(str(file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
+            ds.is_little_endian = True
+            ds.is_implicit_VR = False
+            ds.SOPClassUID = CTImageStorage
+            ds.SOPInstanceUID = sop_uid
+            ds.StudyInstanceUID = study_uid
+            ds.SeriesInstanceUID = series_uid
+            ds.FrameOfReferenceUID = frame_uid
+            ds.PatientName = patient_name
+            ds.PatientID = patient_id
+            ds.StudyDate = study_date
+            ds.StudyTime = study_time
+            ds.Modality = "CT"
+            ds.SeriesNumber = 1
+            ds.InstanceNumber = z + 1
+            ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
+            ds.ImageOrientationPatient = orientation
+            ds.ImagePositionPatient = [
+                float(origin[0]),
+                float(origin[1]),
+                float(origin[2] + z * spacing[2]),
+            ]
+            ds.SliceLocation = float(origin[2] + z * spacing[2])
+            ds.SliceThickness = float(spacing[2])
+            ds.SpacingBetweenSlices = float(spacing[2])
+            ds.PixelSpacing = [float(spacing[1]), float(spacing[0])]
+            ds.Rows = int(rows)
+            ds.Columns = int(cols)
+            ds.SamplesPerPixel = 1
+            ds.PhotometricInterpretation = "MONOCHROME2"
+            ds.BitsAllocated = 16
+            ds.BitsStored = 16
+            ds.HighBit = 15
+            ds.PixelRepresentation = 1
+            ds.RescaleIntercept = 0
+            ds.RescaleSlope = 1
+            ds.RescaleType = "HU"
+            ds.PixelData = np.ascontiguousarray(slice_arr).tobytes()
+            ds.save_as(str(file_path), write_like_original=False)
+    _write_json(
+        ct_dir / "ct_series.json",
+        {
+            "case_id": case_id,
+            "study_instance_uid": study_uid,
+            "series_instance_uid": series_uid,
+            "frame_of_reference_uid": frame_uid,
+            "origin_xyz_mm": origin,
+            "resolution_xyz_mm": spacing,
+            "shape_zyx": [int(z_slices), int(rows), int(cols)],
+        },
+    )
+    return {"status": "created", "ct_dir": str(ct_dir), "slices": int(z_slices)}
+
+
+def _write_rt_struct_dicom(
+    case_dir: Path,
+    case_id: str,
+    overwrite: bool = False,
+) -> dict:
+    rt_dir = _rt_struct_dir(case_id)
+    rt_path = rt_dir / "rt_struct_portpy.dcm"
+    if rt_path.exists() and not overwrite:
+        return {"status": "exists", "artifact": str(rt_path)}
+    rt_dir.mkdir(parents=True, exist_ok=True)
+    if overwrite and rt_path.exists():
+        rt_path.unlink()
+    ct_result = _write_ct_dicom(case_dir, case_id, overwrite=False)
+    ct_dir = _ct_dicom_dir(case_id)
+    ct_files = sorted(ct_dir.glob("*.dcm"))
+    if not ct_files:
+        raise HTTPException(status_code=404, detail="CT DICOM series not found")
+    try:
+        from datetime import datetime
+        from pydicom import dcmread
+        from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+        from pydicom.sequence import Sequence
+        from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, RTStructureSetStorage, generate_uid
+        from skimage import measure
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"missing dependency: {exc}") from exc
+    ct_first = None
+    ct_sops = []
+    ct_positions = []
+    for path in ct_files:
+        ds = dcmread(str(path), stop_before_pixels=True)
+        if ct_first is None:
+            ct_first = ds
+        ct_sops.append(ds.SOPInstanceUID)
+        ct_positions.append(ds.ImagePositionPatient)
+    if ct_first is None:
+        raise HTTPException(status_code=404, detail="CT DICOM series not found")
+    meta, _ct_path, _dataset = _ct_reference(case_dir)
+    orientation = ct_first.ImageOrientationPatient
+    col_dir = np.array(orientation[0:3], dtype=float)
+    row_dir = np.array(orientation[3:6], dtype=float)
+    row_spacing, col_spacing = ct_first.PixelSpacing
+    series_uid = generate_uid()
+    sop_uid = generate_uid()
+    file_meta = FileMetaDataset()
+    file_meta.MediaStorageSOPClassUID = RTStructureSetStorage
+    file_meta.MediaStorageSOPInstanceUID = sop_uid
+    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    file_meta.ImplementationClassUID = generate_uid()
+    ds = FileDataset(str(rt_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
+    ds.is_little_endian = True
+    ds.is_implicit_VR = False
+    ds.SOPClassUID = RTStructureSetStorage
+    ds.SOPInstanceUID = sop_uid
+    ds.StudyInstanceUID = ct_first.StudyInstanceUID
+    ds.SeriesInstanceUID = series_uid
+    ds.FrameOfReferenceUID = ct_first.FrameOfReferenceUID
+    ds.PatientName = ct_first.PatientName
+    ds.PatientID = ct_first.PatientID
+    ds.StudyDate = ct_first.StudyDate
+    ds.StudyTime = ct_first.StudyTime
+    ds.Modality = "RTSTRUCT"
+    ds.StructureSetLabel = f"{case_id}_PortPy"
+    ds.StructureSetDate = ct_first.StudyDate or datetime.utcnow().strftime("%Y%m%d")
+    ds.StructureSetTime = ct_first.StudyTime or datetime.utcnow().strftime("%H%M%S")
+    ref_frame = Dataset()
+    ref_frame.FrameOfReferenceUID = ct_first.FrameOfReferenceUID
+    ref_study = Dataset()
+    ref_study.ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.1"
+    ref_study.ReferencedSOPInstanceUID = ct_first.StudyInstanceUID
+    ref_series = Dataset()
+    ref_series.SeriesInstanceUID = ct_first.SeriesInstanceUID
+    contour_image_seq = Sequence()
+    for sop in ct_sops:
+        img_ref = Dataset()
+        img_ref.ReferencedSOPClassUID = CTImageStorage
+        img_ref.ReferencedSOPInstanceUID = sop
+        contour_image_seq.append(img_ref)
+    ref_series.ContourImageSequence = contour_image_seq
+    ref_study.RTReferencedSeriesSequence = Sequence([ref_series])
+    ref_frame.RTReferencedStudySequence = Sequence([ref_study])
+    ds.ReferencedFrameOfReferenceSequence = Sequence([ref_frame])
+    ds.StructureSetROISequence = Sequence()
+    ds.ROIContourSequence = Sequence()
+    ds.RTROIObservationsSequence = Sequence()
+    entries = _structure_entries(case_dir)
+    dicom_name_map = {}
+    meta_path = case_dir / "StructureSet_MetaData.json"
+    if meta_path.exists():
+        try:
+            meta = _read_json(meta_path)
+            for item in meta:
+                key = item.get("name")
+                if key:
+                    dicom_name_map[key] = item.get("dicom_structure_name") or key
+        except json.JSONDecodeError:
+            pass
+    roi_number = 1
+    for entry in entries:
+        name = entry["name"]
+        mask_path = entry["path"]
+        dataset = entry["dataset"]
+        dicom_name = dicom_name_map.get(name, name)
+        with h5py.File(mask_path, "r") as handle:
+            mask = handle[dataset][:]
+        if np.max(mask) <= 0:
+            continue
+        roi = Dataset()
+        roi.ROINumber = roi_number
+        roi.ReferencedFrameOfReferenceUID = ct_first.FrameOfReferenceUID
+        roi.ROIName = dicom_name
+        roi.ROIGenerationAlgorithm = "AUTOMATIC"
+        ds.StructureSetROISequence.append(roi)
+        roi_contour = Dataset()
+        roi_contour.ReferencedROINumber = roi_number
+        color = STRUCTURE_COLORS[(roi_number - 1) % len(STRUCTURE_COLORS)]
+        roi_contour.ROIDisplayColor = [int(color[0]), int(color[1]), int(color[2])]
+        contour_seq = Sequence()
+        for z in range(mask.shape[0]):
+            slice_mask = mask[z].astype(bool)
+            if not np.any(slice_mask):
+                continue
+            contours = measure.find_contours(slice_mask.astype(np.uint8), 0.5)
+            if not contours:
+                continue
+            ipp = np.array(ct_positions[z], dtype=float)
+            for contour in contours:
+                points = []
+                for row, col in contour:
+                    coord = (
+                        ipp
+                        + row * float(row_spacing) * row_dir
+                        + col * float(col_spacing) * col_dir
+                    )
+                    points.extend([float(coord[0]), float(coord[1]), float(coord[2])])
+                if len(points) < 6:
+                    continue
+                if points[0:3] != points[-3:]:
+                    points.extend(points[0:3])
+                contour_item = Dataset()
+                contour_item.ContourGeometricType = "CLOSED_PLANAR"
+                contour_item.NumberOfContourPoints = int(len(points) / 3)
+                contour_item.ContourData = points
+                img_ref = Dataset()
+                img_ref.ReferencedSOPClassUID = CTImageStorage
+                img_ref.ReferencedSOPInstanceUID = ct_sops[z]
+                contour_item.ContourImageSequence = Sequence([img_ref])
+                contour_seq.append(contour_item)
+        if not contour_seq:
+            continue
+        roi_contour.ContourSequence = contour_seq
+        ds.ROIContourSequence.append(roi_contour)
+        obs = Dataset()
+        obs.ObservationNumber = roi_number
+        obs.ReferencedROINumber = roi_number
+        obs.RTROIInterpretedType = "ORGAN"
+        obs.ROIInterpreter = ""
+        ds.RTROIObservationsSequence.append(obs)
+        roi_number += 1
+    ds.save_as(str(rt_path), write_like_original=False)
+    return {"status": "created", "artifact": str(rt_path), "ct_dir": str(ct_result.get("ct_dir"))}
+
+def _write_rt_dose_dicom(
+    out_dir: Path,
+    case_dir: Path,
+    plan_ds,
+    overwrite: bool = False,
+) -> dict:
+    dose_dcm_path = out_dir / "rt_dose_portpy_vmat.dcm"
+    if dose_dcm_path.exists() and not overwrite:
+        return {"status": "exists", "artifact": dose_dcm_path.name}
+    dose_path = out_dir / "dose_3d.npy"
+    if not dose_path.exists():
+        raise HTTPException(status_code=404, detail="dose_3d.npy not found")
+    meta_path = out_dir / "dose_3d_meta.json"
+    if meta_path.exists():
+        meta = _read_json(meta_path)
+    else:
+        meta, _ct_path, _dataset = _ct_reference(case_dir)
+    dose_arr = np.load(dose_path)
+    z_slices, rows, cols = dose_arr.shape
+    max_dose = float(np.max(dose_arr))
+    max_pixel = np.iinfo(np.uint32).max
+    if max_dose <= 0:
+        scaling = 1.0
+        scaled = np.zeros_like(dose_arr, dtype=np.uint32)
+    else:
+        scaling = max_dose / max_pixel
+        scaled = np.rint(dose_arr / scaling)
+        scaled = np.clip(scaled, 0, max_pixel).astype(np.uint32)
+    origin = meta.get("origin_xyz_mm", [0.0, 0.0, 0.0])
+    spacing = meta.get("resolution_xyz_mm", [1.0, 1.0, 1.0])
+    direction = meta.get("direction") or [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    orientation = [
+        float(direction[0]),
+        float(direction[1]),
+        float(direction[2]),
+        float(direction[3]),
+        float(direction[4]),
+        float(direction[5]),
+    ]
+    try:
+        from pydicom import dcmread
+        from pydicom.dataset import Dataset
+        from pydicom.sequence import Sequence
+        from pydicom.uid import generate_uid
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"pydicom not available: {exc}") from exc
+    template_path = _rt_dose_template(case_dir)
+    ds = dcmread(str(template_path))
+    ds.Rows = int(rows)
+    ds.Columns = int(cols)
+    ds.NumberOfFrames = int(z_slices)
+    ds.PixelSpacing = [float(spacing[1]), float(spacing[0])]
+    ds.GridFrameOffsetVector = [float(i * spacing[2]) for i in range(z_slices)]
+    ds.ImagePositionPatient = [float(origin[0]), float(origin[1]), float(origin[2])]
+    ds.ImageOrientationPatient = orientation
+    ds.BitsAllocated = 32
+    ds.BitsStored = 32
+    ds.HighBit = 31
+    ds.PixelRepresentation = 0
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.DoseUnits = "GY"
+    ds.DoseType = "PHYSICAL"
+    ds.DoseGridScaling = float(scaling)
+    ds.StudyInstanceUID = getattr(plan_ds, "StudyInstanceUID", ds.StudyInstanceUID)
+    ds.FrameOfReferenceUID = getattr(plan_ds, "FrameOfReferenceUID", ds.FrameOfReferenceUID)
+    ds.PatientName = getattr(plan_ds, "PatientName", ds.get("PatientName", ""))
+    ds.PatientID = getattr(plan_ds, "PatientID", ds.get("PatientID", ""))
+    ds.StudyDate = getattr(plan_ds, "StudyDate", ds.get("StudyDate", ""))
+    ds.StudyTime = getattr(plan_ds, "StudyTime", ds.get("StudyTime", ""))
+    dose_series_uid = generate_uid()
+    dose_sop_uid = generate_uid()
+    _update_dicom_uids(ds, dose_series_uid, dose_sop_uid)
+    if hasattr(ds, "ReferencedRTPlanSequence") and ds.ReferencedRTPlanSequence:
+        ds.ReferencedRTPlanSequence[0].ReferencedSOPInstanceUID = plan_ds.SOPInstanceUID
+    else:
+        ref = Sequence()
+        item = Dataset()
+        item.ReferencedSOPClassUID = plan_ds.SOPClassUID
+        item.ReferencedSOPInstanceUID = plan_ds.SOPInstanceUID
+        ref.append(item)
+        ds.ReferencedRTPlanSequence = ref
+    ds.PixelData = np.ascontiguousarray(scaled).tobytes()
+    ds.save_as(str(dose_dcm_path), write_like_original=False)
+    return {"status": "created", "artifact": dose_dcm_path.name}
 
 def _mask_edge(mask: np.ndarray) -> np.ndarray:
     padded = np.pad(mask, 1, mode="constant", constant_values=False)
@@ -432,11 +833,11 @@ def create_rt_plan(run_id: str, overwrite: bool = Query(False)) -> dict:
     if not out_dir.exists():
         raise HTTPException(status_code=404, detail="run not found")
     rt_path = out_dir / "rt_plan_portpy_vmat.dcm"
-    if rt_path.exists() and not overwrite:
-        return {"status": "exists", "artifact": rt_path.name}
     try:
         import portpy.photon as pp
         from portpy.photon.utils import write_rt_plan_vmat
+        from pydicom import dcmread
+        from pydicom.uid import generate_uid
     except ImportError as exc:
         raise HTTPException(status_code=500, detail=f"portpy/pydicom not available: {exc}") from exc
     plan_path = out_dir / "my_plan.pkl"
@@ -445,13 +846,44 @@ def create_rt_plan(run_id: str, overwrite: bool = Query(False)) -> dict:
     case_dir, _config = _resolve_case_dir(run_id)
     template_path = _rt_plan_template(case_dir)
     _ensure_echo_vmat_on_path()
-    my_plan = pp.load_plan(plan_name=plan_path.name, path=str(out_dir))
-    write_rt_plan_vmat(
-        my_plan=my_plan,
-        in_rt_plan_file=str(template_path),
-        out_rt_plan_file=str(rt_path),
-    )
-    return {"status": "created", "artifact": rt_path.name}
+    plan_created = False
+    if rt_path.exists() and not overwrite:
+        plan_ds = dcmread(str(rt_path))
+    else:
+        my_plan = pp.load_plan(plan_name=plan_path.name, path=str(out_dir))
+        write_rt_plan_vmat(
+            my_plan=my_plan,
+            in_rt_plan_file=str(template_path),
+            out_rt_plan_file=str(rt_path),
+        )
+        plan_ds = dcmread(str(rt_path))
+        _update_dicom_uids(plan_ds, generate_uid(), generate_uid())
+        plan_ds.save_as(str(rt_path), write_like_original=False)
+        plan_created = True
+    dose_path = out_dir / "dose_3d.npy"
+    if not dose_path.exists() or overwrite:
+        create_dose_3d(run_id=run_id, overwrite=overwrite)
+    dose_payload = _write_rt_dose_dicom(out_dir, case_dir, plan_ds, overwrite=overwrite)
+    status = "created" if plan_created or dose_payload.get("status") == "created" else "exists"
+    return {
+        "status": status,
+        "artifact": rt_path.name,
+        "dose_artifact": dose_payload.get("artifact"),
+    }
+
+
+@app.post("/runs/{run_id}/ct-dicom")
+def create_ct_dicom(run_id: str, overwrite: bool = Query(False)) -> dict:
+    case_dir, config = _resolve_case_dir(run_id)
+    case_id = config.get("case_id") or case_dir.name
+    return _write_ct_dicom(case_dir, case_id, overwrite=overwrite)
+
+
+@app.post("/runs/{run_id}/rtstruct")
+def create_rt_struct(run_id: str, overwrite: bool = Query(False)) -> dict:
+    case_dir, config = _resolve_case_dir(run_id)
+    case_id = config.get("case_id") or case_dir.name
+    return _write_rt_struct_dicom(case_dir, case_id, overwrite=overwrite)
 
 
 @app.post("/runs/{run_id}/dose-3d")
