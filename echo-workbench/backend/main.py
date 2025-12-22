@@ -16,9 +16,9 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 try:
-    from backend.runner import _default_data_dir, run_echo_example, _ensure_echo_vmat_on_path
+    from backend.runner import _default_data_dir, run_echo_example, run_compressrtp, _ensure_echo_vmat_on_path
 except ImportError:
-    from runner import _default_data_dir, run_echo_example, _ensure_echo_vmat_on_path
+    from runner import _default_data_dir, run_echo_example, run_compressrtp, _ensure_echo_vmat_on_path
 
 try:
     from adapters.example_adapter import ExampleAdapter
@@ -29,7 +29,9 @@ except ImportError:
 
 
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
+RUNS_DIR_COMPRESS = Path(__file__).resolve().parent / "runs-compressrtp"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
+RUNS_DIR_COMPRESS.mkdir(parents=True, exist_ok=True)
 WORKBENCH_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = WORKBENCH_DIR / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -59,11 +61,17 @@ class RunRequest(BaseModel):
     hf_repo_id: Optional[str] = None
     hf_token: Optional[str] = None
     hf_subdir: Optional[str] = None
+    optimizer: Literal["echo-vmat", "compressrtp"] = "echo-vmat"
     use_planner_beams: bool = False
     use_available_beams: bool = False
     force_sparse: bool = False
     fast: bool = False
     super_fast: bool = False
+    compress_mode: Literal["sparse-only", "sparse-plus-low-rank", "wavelet"] = "sparse-only"
+    threshold_perc: float = 10.0
+    rank: int = 5
+    step: Optional[Literal["ddc", "sparse", "svd", "wavelet"]] = None
+    beam_ids: Optional[list[int]] = None
 
 
 class RunResponse(BaseModel):
@@ -96,10 +104,20 @@ def _read_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def _run_roots() -> dict[str, Path]:
+    return {"echo-vmat": RUNS_DIR, "compressrtp": RUNS_DIR_COMPRESS}
+
+
+def _find_run_dir(run_id: str) -> Path:
+    for root in _run_roots().values():
+        candidate = root / run_id
+        if candidate.exists():
+            return candidate
+    raise HTTPException(status_code=404, detail="run not found")
+
+
 def _load_run_config(run_id: str) -> dict:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     config_path = out_dir / "config.json"
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="config.json not found for run")
@@ -638,17 +656,36 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
     force_sparse = req.force_sparse or req.fast or req.super_fast
 
     try:
-        run_echo_example(
-            case_id=req.case_id,
-            protocol_name=req.protocol,
-            data_dir=_default_data_dir(),
-            out_dir=out_dir,
-            use_planner_beams=use_planner_beams,
-            use_available_beams=use_available_beams,
-            force_sparse=force_sparse,
-            super_fast=req.super_fast,
-            adapter=adapter,
-        )
+        if req.optimizer == "compressrtp":
+            run_compressrtp(
+                case_id=req.case_id,
+                protocol_name=req.protocol,
+                data_dir=_default_data_dir(),
+                out_dir=out_dir,
+                solver="MOSEK",
+                use_planner_beams=use_planner_beams,
+                use_available_beams=use_available_beams,
+                beam_ids_override=req.beam_ids,
+                compress_mode=req.compress_mode,
+                threshold_perc=req.threshold_perc,
+                rank=req.rank,
+                step=req.step,
+                fast=req.fast,
+                super_fast=req.super_fast,
+                adapter=adapter,
+            )
+        else:
+            run_echo_example(
+                case_id=req.case_id,
+                protocol_name=req.protocol,
+                data_dir=_default_data_dir(),
+                out_dir=out_dir,
+                use_planner_beams=use_planner_beams,
+                use_available_beams=use_available_beams,
+                force_sparse=force_sparse,
+                super_fast=req.super_fast,
+                adapter=adapter,
+            )
     except Exception as exc:
         _write_json(out_dir / "status.json", {"state": "error", "error": str(exc)})
 
@@ -656,7 +693,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
 @app.post("/runs", response_model=RunResponse)
 def create_run(req: RunRequest) -> RunResponse:
     run_id = uuid4().hex
-    out_dir = RUNS_DIR / run_id
+    out_dir = RUNS_DIR_COMPRESS / run_id if req.optimizer == "compressrtp" else RUNS_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_json(out_dir / "status.json", {"state": "queued"})
 
@@ -668,31 +705,50 @@ def create_run(req: RunRequest) -> RunResponse:
 @app.get("/runs")
 def list_runs() -> dict:
     runs = []
-    for path in sorted(RUNS_DIR.iterdir(), reverse=True):
-        if not path.is_dir():
-            continue
-        status_path = path / "status.json"
-        status = _read_json(status_path) if status_path.exists() else {"state": "unknown"}
-        runs.append({"run_id": path.name, "status": status})
+    for run_type, root in _run_roots().items():
+        for path in root.iterdir():
+            if not path.is_dir():
+                continue
+            status_path = path / "status.json"
+            status = _read_json(status_path) if status_path.exists() else {"state": "unknown"}
+            config_path = path / "config.json"
+            config = _read_json(config_path) if config_path.exists() else {}
+            runs.append(
+                {
+                    "run_id": path.name,
+                    "status": status,
+                    "run_type": config.get("optimizer", run_type),
+                    "case_id": config.get("case_id"),
+                    "protocol": config.get("protocol"),
+                    "started_at": status.get("started_at"),
+                    "timestamp": path.stat().st_mtime,
+                }
+            )
+    runs.sort(key=lambda item: item.get("timestamp", 0), reverse=True)
     return {"runs": runs}
 
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     status_path = out_dir / "status.json"
     status = _read_json(status_path) if status_path.exists() else {"state": "unknown"}
     artifacts = sorted([p.name for p in out_dir.iterdir() if p.is_file()])
-    return {"run_id": run_id, "status": status, "artifacts": artifacts}
+    config_path = out_dir / "config.json"
+    config = _read_json(config_path) if config_path.exists() else {}
+    return {
+        "run_id": run_id,
+        "status": status,
+        "artifacts": artifacts,
+        "run_type": config.get("optimizer", "echo-vmat"),
+        "case_id": config.get("case_id"),
+        "protocol": config.get("protocol"),
+    }
 
 
 @app.get("/runs/{run_id}/events")
 async def stream_events(run_id: str) -> StreamingResponse:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     events_path = out_dir / "events.jsonl"
     status_path = out_dir / "status.json"
 
@@ -719,9 +775,7 @@ async def stream_events(run_id: str) -> StreamingResponse:
 
 @app.get("/runs/{run_id}/artifacts/{name}")
 def get_artifact(run_id: str, name: str) -> FileResponse:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     if Path(name).name != name:
         raise HTTPException(status_code=400, detail="invalid artifact name")
     path = out_dir / name
@@ -829,9 +883,7 @@ def get_structure_slice(
 
 @app.post("/runs/{run_id}/rtplan")
 def create_rt_plan(run_id: str, overwrite: bool = Query(False)) -> dict:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     rt_path = out_dir / "rt_plan_portpy_vmat.dcm"
     try:
         import portpy.photon as pp
@@ -888,9 +940,7 @@ def create_rt_struct(run_id: str, overwrite: bool = Query(False)) -> dict:
 
 @app.post("/runs/{run_id}/dose-3d")
 def create_dose_3d(run_id: str, overwrite: bool = Query(False)) -> dict:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     dose_path = out_dir / "dose_3d.npy"
     meta_path = out_dir / "dose_3d_meta.json"
     if dose_path.exists() and not overwrite:
@@ -952,9 +1002,7 @@ def get_dose_slice(
     dose_min: float = Query(0.0, ge=0.0),
     dose_max: Optional[float] = Query(None),
 ) -> Response:
-    out_dir = RUNS_DIR / run_id
-    if not out_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
+    out_dir = _find_run_dir(run_id)
     dose_path = out_dir / "dose_3d.npy"
     if not dose_path.exists():
         raise HTTPException(status_code=404, detail="dose_3d.npy not found")

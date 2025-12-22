@@ -15,6 +15,17 @@ const PRESETS = [
   { id: "balanced", label: "Balanced" },
 ];
 
+const OPTIMIZERS = [
+  { id: "echo-vmat", label: "ECHO-VMAT" },
+  { id: "compressrtp", label: "CompressRTP" },
+];
+
+const COMPRESS_MODES = [
+  { id: "sparse-only", label: "Sparse Only (RMR)" },
+  { id: "sparse-plus-low-rank", label: "Sparse + Low Rank" },
+  { id: "wavelet", label: "Wavelet Smoothness" },
+];
+
 const STAGES = [
   { id: "dataset_download", label: "Dataset" },
   { id: "case_load", label: "Case Load" },
@@ -442,6 +453,11 @@ export default function HomePage() {
   const [caseId, setCaseId] = useState(CASE_OPTIONS[0].id);
   const [protocol, setProtocol] = useState("Lung_2Gy_30Fx");
   const [preset, setPreset] = useState("super_fast");
+  const [optimizer, setOptimizer] = useState("echo-vmat");
+  const [compressMode, setCompressMode] = useState("sparse-only");
+  const [thresholdPerc, setThresholdPerc] = useState(10);
+  const [rank, setRank] = useState(5);
+  const [beamCount, setBeamCount] = useState("");
   const [availableRuns, setAvailableRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [runId, setRunId] = useState(null);
@@ -534,7 +550,18 @@ export default function HomePage() {
         adapter: "example",
         fast: preset === "fast",
         super_fast: preset === "super_fast",
+        optimizer,
+        compress_mode: compressMode,
+        threshold_perc: thresholdPerc,
+        rank,
       };
+      if (optimizer === "compressrtp") {
+        const parsedCount = Number.parseInt(String(beamCount).trim(), 10);
+        if (Number.isFinite(parsedCount) && parsedCount > 0) {
+          const capped = Math.min(parsedCount, 37);
+          payload.beam_ids = Array.from({ length: capped }, (_, idx) => idx);
+        }
+      }
       const response = await fetch(`${apiBase}/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1280,8 +1307,8 @@ export default function HomePage() {
                   >
                     <div className="run-id">{run.run_id}</div>
                     <div className="run-meta">
-                      <span>{run.status?.case_id || "unknown"}</span>
-                      <span>{run.status?.state || "unknown"}</span>
+                      <span>{run.case_id || run.status?.case_id || "unknown"}</span>
+                      <span>{run.run_type || "echo-vmat"} · {run.status?.state || "unknown"}</span>
                     </div>
                   </div>
                 ))
@@ -1299,6 +1326,81 @@ export default function HomePage() {
               </div>
             </div>
             <div style={{ display: "grid", gap: "10px" }}>
+              <label htmlFor="optimizer">Optimizer</label>
+              <select
+                id="optimizer"
+                value={optimizer}
+                onChange={(event) => setOptimizer(event.target.value)}
+              >
+                {OPTIMIZERS.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {optimizer === "compressrtp" ? (
+                <>
+                  <label htmlFor="compress-mode">Compression</label>
+                  <select
+                    id="compress-mode"
+                    value={compressMode}
+                    onChange={(event) => setCompressMode(event.target.value)}
+                  >
+                    {COMPRESS_MODES.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <label htmlFor="threshold-perc">Threshold %</label>
+                  <input
+                    id="threshold-perc"
+                    type="number"
+                    min="1"
+                    max="50"
+                    step="1"
+                    value={thresholdPerc}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      if (Number.isFinite(value)) {
+                        setThresholdPerc(value);
+                      }
+                    }}
+                  />
+                  <label htmlFor="beam-count">Beam count (test)</label>
+                  <input
+                    id="beam-count"
+                    type="number"
+                    min="1"
+                    max="37"
+                    placeholder="Leave blank for PlannerBeams.json"
+                    value={beamCount}
+                    onChange={(event) => setBeamCount(event.target.value)}
+                  />
+                  <div style={{ color: "#94a3b8", fontSize: "12px" }}>
+                    Start with 3 for quick DDC checks; use 7 for closer planner behavior.
+                  </div>
+                  {compressMode === "sparse-plus-low-rank" ? (
+                    <>
+                      <label htmlFor="rank">Low-rank k</label>
+                      <input
+                        id="rank"
+                        type="number"
+                        min="1"
+                        max="20"
+                        step="1"
+                        value={rank}
+                        onChange={(event) => {
+                          const value = Number(event.target.value);
+                          if (Number.isFinite(value)) {
+                            setRank(value);
+                          }
+                        }}
+                      />
+                    </>
+                  ) : null}
+                </>
+              ) : null}
               <label htmlFor="protocol">Protocol</label>
               <input
                 id="protocol"
@@ -1322,7 +1424,7 @@ export default function HomePage() {
                 <option value="">Select a run</option>
                 {availableRuns.map((run) => (
                   <option key={run.run_id} value={run.run_id}>
-                    {run.run_id} ({run.status?.state || "unknown"})
+                    {run.run_id} ({run.run_type || "echo-vmat"} · {run.status?.state || "unknown"})
                   </option>
                 ))}
               </select>
@@ -1419,7 +1521,7 @@ export default function HomePage() {
                   <option value="">Select run</option>
                   {availableRuns.map((run) => (
                     <option key={`a-${run.run_id}`} value={run.run_id}>
-                      {run.run_id}
+                      {run.run_id} ({run.run_type || "echo-vmat"})
                     </option>
                   ))}
                 </select>
@@ -1434,7 +1536,7 @@ export default function HomePage() {
                   <option value="">Select run</option>
                   {availableRuns.map((run) => (
                     <option key={`b-${run.run_id}`} value={run.run_id}>
-                      {run.run_id}
+                      {run.run_id} ({run.run_type || "echo-vmat"})
                     </option>
                   ))}
                 </select>

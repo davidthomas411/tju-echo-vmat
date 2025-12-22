@@ -1,4 +1,5 @@
 # TJU ECHO-VMAT Workbench
+![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
 
 
 ![ECHO-VMAT Workbench UI](docs/screenshots/ui-2025-12-22.jpg)
@@ -34,6 +35,7 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 ```
 echo-workbench/
 ├── backend/                 # FastAPI app + runner
+├── compressrtp/             # CompressRTP repo (submodule)
 ├── data/                    # dataset cache (raw/processed)
 ├── echo-vmat/               # ECHO-VMAT repo (submodule)
 ├── frontend/                # Next.js UI
@@ -47,6 +49,7 @@ If you cloned this repo fresh:
 ```
 git submodule update --init --recursive
 ```
+This also pulls the CompressRTP submodule under `echo-workbench/compressrtp`.
 
 ### 2) Python venv
 ```
@@ -61,6 +64,10 @@ python -m pip install -r echo-workbench/echo-vmat/requirements.txt
 Optional (RT Plan export):
 ```
 python -m pip install "portpy[pydicom]"
+```
+CompressRTP dependencies (wavelets + SVD helpers):
+```
+python -m pip install -r echo-workbench/backend/requirements.txt
 ```
 
 ### 4) Run the ECHO example (CLI)
@@ -77,12 +84,20 @@ python -m pip install "portpy[pydicom]"
 cd /mnt/d/_PROJECTS/ECHO-VMAT_Project/echo-workbench
 python -m uvicorn backend.main:app --reload --port 8000
 ```
+Faster dev server (limits watch scope, avoids large repo scan):
+```
+/mnt/d/_PROJECTS/ECHO-VMAT_Project/echo-workbench/scripts/dev_backend.sh
+```
 
 ### 6) Frontend UI
 ```
 cd /mnt/d/_PROJECTS/ECHO-VMAT_Project/echo-workbench/frontend
 npm install
 npm run dev
+```
+Convenience dev script:
+```
+/mnt/d/_PROJECTS/ECHO-VMAT_Project/echo-workbench/scripts/dev_frontend.sh
 ```
 Open: http://localhost:3000
 
@@ -93,6 +108,14 @@ UI notes:
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
 - Use "Generate RT Plan" to export DICOM RT Plan + RT Dose for TPS import.
 
+CompressRTP notes:
+- Select Optimizer = CompressRTP and choose a compression mode.
+- CompressRTP outputs are saved under `echo-workbench/backend/runs-compressrtp/<run_id>/`.
+- The UI lists both ECHO-VMAT and CompressRTP runs with type labels.
+Step diagnostics (CLI, stop after a stage):
+```
+python echo-workbench/backend/runner.py --optimizer compressrtp --step ddc --beam-ids 0,1,2
+```
 
 CT DICOM export (once per patient):
 ```
@@ -107,6 +130,10 @@ curl -X POST http://127.0.0.1:8000/runs/<run_id>/rtstruct
 All run outputs are saved under:
 ```
 echo-workbench/backend/runs/<run_id>/
+```
+CompressRTP outputs are stored separately:
+```
+echo-workbench/backend/runs-compressrtp/<run_id>/
 ```
 Key files:
 - `config.json`, `status.json`, `timing.json`
@@ -126,6 +153,13 @@ RT Structure Set DICOM (generated once per patient) is saved under:
 ```
 echo-workbench/data/processed/dicom/<case_id>/rtstruct/rt_struct_portpy.dcm
 ```
+
+## Tests
+CompressRTP integration smoke tests (may take time, uses Lung_Patient_11):
+```
+python -m unittest echo-workbench/backend/tests/test_compressrtp_integration.py
+```
+MOSEK license: ensure `mosek.lic` is present at repo root or set `MOSEKLM_LICENSE_FILE`.
 
 ## Data Management
 - Raw data is expected under `echo-workbench/PortPy/data`.

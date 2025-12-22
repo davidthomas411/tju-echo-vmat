@@ -67,6 +67,10 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] Structure overlay (CT axial outlines)
 - [x] Optional 3D dose export + CT/dose overlay (no recompute on display)
 - [x] RT Plan DICOM export button (uses ECHO template plan)
+- [x] Added CompressRTP submodule + runner integration (separate run root)
+- [x] UI optimizer selector with CompressRTP modes (sparse-only, sparse+low-rank, wavelet)
+- [x] CompressRTP artifacts (metrics/DVH/plan/solution) saved under `runs-compressrtp/`
+- [x] CompressRTP integration tests (3 modes) pass on Lung_Patient_11
 
 ---
 
@@ -122,6 +126,9 @@ echo-workbench/
 │   │       ├── clinical_criteria.json
 │   │       ├── solver_trace.json
 │   │       └── logs.txt
+│   ├── runs-compressrtp/
+│   │   └── <run_id>/
+│   ├── runs-compressrtp-tests/
 │   ├── adapters/
 │   │   ├── base_adapter.py
 │   │   ├── example_adapter.py

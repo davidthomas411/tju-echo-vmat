@@ -1,3 +1,6 @@
 [submodule "echo-workbench/echo-vmat"]
 	path = echo-workbench/echo-vmat
 	url = https://github.com/PortPy-Project/ECHO-VMAT
+[submodule "echo-workbench/compressrtp"]
+	path = echo-workbench/compressrtp
+	url = https://github.com/PortPy-Project/CompressRTP

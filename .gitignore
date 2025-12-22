@@ -20,6 +20,8 @@ echo-workbench/PortPy/
 echo-workbench/data/raw/
 echo-workbench/data/processed/
 echo-workbench/backend/runs/
+echo-workbench/backend/runs-compressrtp/
+echo-workbench/backend/runs-compressrtp-tests/
 
 # OS
 .DS_Store
