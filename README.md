@@ -123,6 +123,11 @@ Profiling + GPU feasibility notes:
 - `docs/optimization_profiling.md`
 - `docs/gpu_feasibility.md`
 
+Baseline capture:
+```
+python echo-workbench/scripts/record_baseline.py --run-id <RUN_ID>
+```
+
 CT DICOM export (once per patient):
 ```
 curl -X POST http://127.0.0.1:8000/runs/<run_id>/ct-dicom

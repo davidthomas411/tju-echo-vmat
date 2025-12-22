@@ -26,6 +26,13 @@ python echo-workbench/backend/runner.py \
 - `timing.json` → stage timings + peak RAM
 - `status.json` → elapsed time + last RSS sample
 
+## Record a baseline summary
+After a run finishes, save a baseline JSON for later comparison:
+```
+python echo-workbench/scripts/record_baseline.py --run-id <RUN_ID>
+```
+Baselines are stored under `docs/baselines/`.
+
 ## Preset comparisons (fill in per patient)
 - Super-fast: ________ sec, peak RAM ________ MB
 - Fast: ________ sec, peak RAM ________ MB
