@@ -674,6 +674,7 @@ export default function HomePage() {
   const [planScoreStatus, setPlanScoreStatus] = useState("idle");
   const [referenceScore, setReferenceScore] = useState(null);
   const [referenceScoreStatus, setReferenceScoreStatus] = useState("idle");
+  const [planScoreView, setPlanScoreView] = useState("run");
   const [populationScores, setPopulationScores] = useState([]);
   const [populationStats, setPopulationStats] = useState(null);
   const [populationStatus, setPopulationStatus] = useState("idle");
@@ -722,13 +723,27 @@ export default function HomePage() {
           return;
         }
         const patients = payload.patients || [];
-        const options = patients.map((id) => ({
+        const sorted = [...patients].sort((a, b) => {
+          const matchA = String(a).match(/Lung_Patient_(\d+)/);
+          const matchB = String(b).match(/Lung_Patient_(\d+)/);
+          if (matchA && matchB) {
+            return Number.parseInt(matchA[1], 10) - Number.parseInt(matchB[1], 10);
+          }
+          if (matchA) {
+            return -1;
+          }
+          if (matchB) {
+            return 1;
+          }
+          return String(a).localeCompare(String(b));
+        });
+        const options = sorted.map((id) => ({
           id,
           label: id.replaceAll("_", " "),
         }));
         setCaseOptions(options);
-        if (!caseId || !patients.includes(caseId)) {
-          setCaseId(patients[0] || "");
+        if (!caseId || !sorted.includes(caseId)) {
+          setCaseId(sorted[0] || "");
         }
       })
       .catch(() => {
@@ -822,7 +837,13 @@ export default function HomePage() {
   const filteredRuns = useMemo(() => {
     const query = caseFilter.trim().toLowerCase();
     if (!query) {
-      return availableRuns;
+      if (!caseId) {
+        return availableRuns;
+      }
+      return availableRuns.filter((run) => {
+        const caseValue = (run.case_id || run.status?.case_id || "").toLowerCase();
+        return caseValue === caseId.toLowerCase();
+      });
     }
     return availableRuns.filter((run) => {
       const caseValue = (run.case_id || run.status?.case_id || "").toLowerCase();
@@ -830,6 +851,9 @@ export default function HomePage() {
       return caseValue.includes(query) || runIdValue.includes(query);
     });
   }, [availableRuns, caseFilter]);
+
+  const displayPlanScore = planScoreView === "reference" ? referenceScore : planScore;
+  const displayPlanScoreStatus = planScoreView === "reference" ? referenceScoreStatus : planScoreStatus;
 
   async function startRun() {
     setError(null);
@@ -843,6 +867,7 @@ export default function HomePage() {
     setDvhHover(null);
     setPlanScore(null);
     setPlanScoreStatus("idle");
+    setPlanScoreView("run");
     setCtMeta(null);
     setCtSliceIndex(0);
     setStructures([]);
@@ -1341,6 +1366,27 @@ export default function HomePage() {
       });
   }, [apiBase, caseId, protocol]);
 
+  useEffect(() => {
+    if (!runId) {
+      setPlanScoreView("reference");
+    }
+  }, [runId]);
+
+  useEffect(() => {
+    if (!caseId) {
+      return;
+    }
+    const match = filteredRuns.find((run) => run.case_id === caseId);
+    if (!match) {
+      setSelectedRunId("");
+      return;
+    }
+    if (selectedRunId && filteredRuns.some((run) => run.run_id === selectedRunId)) {
+      return;
+    }
+    setSelectedRunId(match.run_id);
+  }, [caseId, filteredRuns, selectedRunId]);
+
   const structureNames = useMemo(() => {
     const names = new Set();
     [dvhData, compareDvhA, compareDvhB].forEach((dataset) => {
@@ -1561,8 +1607,19 @@ export default function HomePage() {
             <span>Elapsed: {elapsedLabel}</span>
             <span>RSS: {rssLabel}</span>
           </div>
-          <button className="btn btn-ghost" onClick={() => loadRun(selectedRunId)}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => loadRun(selectedRunId)}
+            disabled={!selectedRunId}
+          >
             Load Run
+          </button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setPlanScoreView("reference")}
+            disabled={!referenceScore}
+          >
+            Load Reference
           </button>
           <button className="btn btn-primary" onClick={startRun} disabled={isRunning || !caseId}>
             {isRunning ? "Running" : "Run Example"}
@@ -2129,8 +2186,24 @@ export default function HomePage() {
                 <div className="card-title">Plan Score (Population-Based)</div>
                 <div className="card-subtitle">Percentile scoring across 99 lung plans</div>
               </div>
-              <span className={`status-pill ${planScoreStatus === "error" ? "error" : ""}`}>
-                {planScoreStatus}
+              <div className="header-actions">
+                <button
+                  className={`btn btn-ghost ${planScoreView === "run" ? "active" : ""}`}
+                  onClick={() => setPlanScoreView("run")}
+                  disabled={!planScore}
+                >
+                  View Run
+                </button>
+                <button
+                  className={`btn btn-ghost ${planScoreView === "reference" ? "active" : ""}`}
+                  onClick={() => setPlanScoreView("reference")}
+                  disabled={!referenceScore}
+                >
+                  View Reference
+                </button>
+              </div>
+              <span className={`status-pill ${displayPlanScoreStatus === "error" ? "error" : ""}`}>
+                {displayPlanScoreStatus}
               </span>
             </div>
             <div className="plan-score-summary">
@@ -2162,10 +2235,10 @@ export default function HomePage() {
                 </div>
               </div>
             </div>
-            {planScore ? (
+            {displayPlanScore ? (
               <div className="plan-score-grid">
                 <div className="plan-score-daisy">
-                  <DaisyPlot score={planScore} objectives={planScore.objectives || []} />
+                  <DaisyPlot score={displayPlanScore} objectives={displayPlanScore.objectives || []} />
                 </div>
                 <div className="plan-score-table">
                   <div className="table-wrap">
@@ -2179,7 +2252,7 @@ export default function HomePage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {(planScore.objectives || []).map((obj) => (
+                        {(displayPlanScore.objectives || []).map((obj) => (
                           <tr key={obj.id}>
                             <td>{obj.label}</td>
                             <td>
@@ -2206,7 +2279,7 @@ export default function HomePage() {
               </div>
             ) : (
               <div className="placeholder">
-                {planScoreStatus === "loading"
+                {displayPlanScoreStatus === "loading"
                   ? "Scoring plan against population..."
                   : "Plan score not available yet."}
               </div>

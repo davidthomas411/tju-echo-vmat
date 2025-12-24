@@ -187,6 +187,11 @@ label {
   background: transparent;
 }
 
+.btn-ghost.active {
+  border-color: rgba(91, 188, 255, 0.6);
+  color: var(--text);
+}
+
 .btn-toggle {
   width: 100%;
   display: inline-flex;
