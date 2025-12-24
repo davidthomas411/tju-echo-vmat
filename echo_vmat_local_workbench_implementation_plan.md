@@ -76,6 +76,19 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] Stage-aware status + elapsed time + RSS sampling for profiling
 - [x] DICOM exports panel (CT/RTSTRUCT + RTPLAN/RTDOSE) with deterministic paths
 
+## 2.2 Plan Score Pivot (New Phase)
+
+- [x] Review plan score paper (`main.pdf`) + plan-score template repo; confirm objective list, scoring math, and daisy plot requirements
+- [x] Map plan score objectives to the correct protocol-specific optimization params (e.g., `optimization_params_Lung_2Gy_30Fx.json`) and ensure the right file is selected per case
+- [x] Confirm population DVH source (HuggingFace PortPy dataset); download only the minimal files needed (RTDOSE + StructureSet + CT metadata)
+- [x] Implement plan-score module (`backend/plan_score/`) and cache population stats under `data/processed/plan-score/`
+- [x] Store `plan_score.json` per run and expose API endpoint (`/runs/{run_id}/plan-score`)
+- [x] Frontend: add plan score panel + daisy plot visualization
+- [x] Populate patient list from population metadata (`/patients`)
+- [x] Add population score API (`/plan-score/population`) and UI tab with histogram + stats
+- [x] Add patient plan score table (reference scores + latest run score)
+- [ ] Add parameter sweep workflow + documentation for adjustable optimization parameters
+
 ---
 
 ## 3. High‑Level Architecture
@@ -386,6 +399,7 @@ This establishes a **credible, extensible foundation** for future Eclipse‑inte
   - Added `docs/optimization_profiling.md` checklist
 - [~] GPU feasibility study: dose engine + influence matrix on GPU; assess solver alternatives for conic optimization
   - Added `docs/gpu_feasibility.md` with GPU plan + tests (CompressRTP-focused)
+  - Added `--gpu` flag + UI toggle; CuPy helpers + GPU dose computation (CPU fallback)
 - [~] ESAPI adapter (Eclipse case + dose export)
   - Stub `EsapiAdapter` added; integration still pending
 - [~] Multi‑run orchestration (batch queue + compare dashboard)

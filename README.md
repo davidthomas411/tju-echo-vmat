@@ -20,6 +20,9 @@ Local, research-only workbench for running ECHO-VMAT example patients, capturing
 - [x] CT viewer with window/level + wheel slice navigation (square viewport)
 - [x] Structure overlay (per-slice outlines)
 - [x] Optional 3D dose export + CT/dose color overlay
+- [x] Population plan score dataset (99 lung patients, DVH-only, no beam data)
+- [x] Plan score API + per-run plan score artifacts
+- [x] Plan score UI (daisy plot + population tab with histogram)
 - [x] RT Plan DICOM export (from ECHO template plan)
 - [x] RT Dose DICOM export (per run)
 - [x] CT DICOM export (per patient, generated once)
@@ -66,6 +69,10 @@ CompressRTP dependencies (wavelets + SVD helpers):
 ```
 python -m pip install -r echo-workbench/backend/requirements.txt
 ```
+Optional (GPU acceleration for supported CompressRTP steps):
+```
+python -m pip install cupy-cuda12x
+```
 
 ### 4) Run the ECHO example (CLI)
 ```
@@ -104,6 +111,8 @@ UI notes:
 - Click "Create 3D Dose" once to save `dose_3d.npy` for that run.
 - Toggle Dose Overlay in the CT viewer (fast, no recompute).
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
+- Use the Plan Score Population tab to compare reference plan score distribution vs the selected run.
+- Patient list is populated from population DVH metadata; search + filter at the top.
 - Use the DICOM Exports panel to generate CT/RTSTRUCT and RTPLAN/RTDOSE.
 - Add a run tag to label experiments and comparisons.
 - The "Safe (low memory)" preset uses planner beams + sparse matrix to reduce RAM.
@@ -112,11 +121,18 @@ UI notes:
 CompressRTP notes:
 - Select Optimizer = CompressRTP and choose a compression mode.
 - Use Pipeline Step = DDC Only for fast validation runs.
+- GPU toggle (optional) uses CuPy for supported matrix ops; solver remains CPU.
+- For large matrices, GPU dose uses chunked transfers; set `ECHO_GPU_CHUNK_MB` to tune (default 512).
+- For GPU compression (sparse+low-rank thresholding), set `ECHO_GPU_COMPRESS_CHUNK_MB` to tune chunk size (default 256).
 - CompressRTP outputs are saved under `echo-workbench/backend/runs-compressrtp/<run_id>/`.
 - The UI lists both ECHO-VMAT and CompressRTP runs with type labels.
 Step diagnostics (CLI, stop after a stage):
 ```
 python echo-workbench/backend/runner.py --optimizer compressrtp --step ddc --beam-ids 0,1,2
+```
+GPU (CLI):
+```
+python echo-workbench/backend/runner.py --optimizer compressrtp --gpu --beam-ids 0,1,2
 ```
 
 Profiling + GPU feasibility notes:
@@ -172,12 +188,18 @@ CompressRTP integration smoke tests (may take time, uses Lung_Patient_11):
 ```
 python -m unittest echo-workbench/backend/tests/test_compressrtp_integration.py
 ```
+GPU utilities (skips if CuPy unavailable):
+```
+python -m unittest echo-workbench/backend/tests/test_gpu_utils.py
+```
 MOSEK license: ensure `mosek.lic` is present at repo root or set `MOSEKLM_LICENSE_FILE`.
 
 ## Data Management
 - Raw data is expected under `echo-workbench/PortPy/data`.
 - Hugging Face datasets cache to `echo-workbench/data/raw/huggingface/`.
 - Raw data is never modified.
+- Population plan score metadata (RTDOSE + structure masks only) is stored under:
+  `echo-workbench/data/processed/plan-score/Lung_2Gy_30Fx/population_metrics.json`.
 
 ## Notes / Known Issues
 - Full-resolution runs can be long and memory-heavy; use `--fast` or `--super-fast` for smoke tests.

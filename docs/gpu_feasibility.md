@@ -28,7 +28,14 @@ Goal: keep the **same algorithm and solver logic**, but accelerate the expensive
 3) **Dose reshaping**
    - `dose_1d -> dose_3d` mapping can be GPU-accelerated if it is pure indexing/mapping.
 
-Deliverable: same outputs as CPU, with faster compression build time; solver still runs on CPU.
+Deliverable: same outputs as CPU, with faster compression build time where GPU kernels are used; solver still runs on CPU.
+
+Current implementation notes:
+- `--gpu` flag + UI toggle added (optional, off by default).
+- GPU is used for `dose_1d = A @ x` (CuPy), with CPU fallback on error.
+- Sparse+low-rank thresholding can use GPU arrays with chunking; SVD remains CPU (same algorithm).
+- RMR sparse-only + wavelet basis remain CPU (logged fallback).
+- Chunk size for GPU compression is tunable via `ECHO_GPU_COMPRESS_CHUNK_MB`.
 
 ### Phase 2: Optional solver exploration (likely CPU)
 - If GPU solver support is required, evaluate SCS/CVXOPT alternatives.

@@ -10,6 +10,9 @@ if [[ ! -x "${VENV_PY}" ]]; then
 fi
 
 export PYTHONPATH="${ROOT_DIR}"
+if [[ -z "${MOSEKLM_LICENSE_FILE:-}" ]] && [[ -f "${ROOT_DIR}/../mosek.lic" ]]; then
+  export MOSEKLM_LICENSE_FILE="${ROOT_DIR}/../mosek.lic"
+fi
 
 "${VENV_PY}" -m uvicorn backend.main:app --reload \
   --no-access-log \

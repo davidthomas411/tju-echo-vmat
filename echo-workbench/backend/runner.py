@@ -1,4 +1,5 @@
 import argparse
+import os
 import json
 import re
 import sys
@@ -14,6 +15,10 @@ import portpy.photon as pp
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+try:
+    from backend.gpu import estimate_chunk_rows, get_gpu_context, gpu_matmul
+except ImportError:  # pragma: no cover - direct runner invocation
+    from gpu import estimate_chunk_rows, get_gpu_context, gpu_matmul
 
 
 def _repo_root() -> Path:
@@ -631,6 +636,20 @@ def run_echo_example(
     timing["evaluation_sec"] = time.perf_counter() - t_eval_start
     timing["evaluation_rss_mb"] = _rss_mb()
     _stage_end("evaluation", f"Evaluation finished in {timing['evaluation_sec']:.2f}s")
+    try:
+        try:
+            from backend.plan_score.score import compute_plan_score_for_run
+        except ImportError:
+            from plan_score.score import compute_plan_score_for_run
+        plan_score = compute_plan_score_for_run(out_dir, protocol_name)
+        _write_json(out_dir / "plan_score.json", plan_score)
+    except Exception as exc:
+        _log_event(
+            out_dir,
+            "plan_score",
+            f"Plan score not generated: {exc}",
+            level="warning",
+        )
 
     print("saving optimal solution..")
     for i in range(len(solutions)):
@@ -681,6 +700,7 @@ def run_compressrtp(
     step: str | None = None,
     fast: bool = False,
     super_fast: bool = False,
+    use_gpu: bool = False,
     tag: str | None = None,
     adapter=None,
 ) -> Path:
@@ -729,6 +749,7 @@ def run_compressrtp(
         "step": step,
         "fast": fast,
         "super_fast": super_fast,
+        "use_gpu": use_gpu,
         "adapter": case_info.source,
         "dataset_download_sec": float(case_info.download_seconds),
     }
@@ -881,7 +902,95 @@ def run_compressrtp(
 
     num_fractions = clinical_criteria.get_num_of_fractions()
     A_full = inf_matrix.A
+    gpu_ctx = None
+    gpu_modules = {}
+    gpu_chunk_mb = None
+    gpu_compress_chunk_mb = None
+    gpu_compress_chunk_rows = None
+    if use_gpu:
+        gpu_ctx, gpu_modules = get_gpu_context(use_gpu=True)
+        if gpu_ctx.enabled:
+            try:
+                gpu_chunk_mb = int(os.environ.get("ECHO_GPU_CHUNK_MB", "512"))
+            except ValueError:
+                gpu_chunk_mb = 512
+            try:
+                gpu_compress_chunk_mb = int(os.environ.get("ECHO_GPU_COMPRESS_CHUNK_MB", "256"))
+            except ValueError:
+                gpu_compress_chunk_mb = 256
+            gpu_compress_chunk_rows = estimate_chunk_rows(A_full, gpu_compress_chunk_mb)
+            _log_event(
+                out_dir,
+                "gpu",
+                f"GPU enabled{f': {gpu_ctx.name}' if gpu_ctx.name else ''}",
+                data={
+                    "free_mb": gpu_ctx.free_mb,
+                    "total_mb": gpu_ctx.total_mb,
+                    "chunk_mb": gpu_chunk_mb,
+                    "compress_chunk_mb": gpu_compress_chunk_mb,
+                    "compress_chunk_rows": gpu_compress_chunk_rows,
+                },
+            )
+        else:
+            _log_event(
+                out_dir,
+                "gpu",
+                "GPU unavailable, falling back to CPU",
+                level="warning",
+                data={"reason": gpu_ctx.reason},
+            )
+    gpu_enabled = bool(gpu_ctx and gpu_ctx.enabled)
+    gpu_xp = gpu_modules.get("xp") if gpu_enabled else None
+
+    def _build_sparse_plus_low_rank(use_gpu_flag: bool):
+        try:
+            result = get_sparse_plus_low_rank(
+                A=A_full,
+                threshold_perc=threshold_perc,
+                rank=rank,
+                xp=gpu_xp if use_gpu_flag else None,
+                chunk_rows=gpu_compress_chunk_rows if use_gpu_flag else None,
+            )
+            if use_gpu_flag:
+                data = {"stage": "compress"}
+                if gpu_compress_chunk_rows is not None and gpu_compress_chunk_rows < A_full.shape[0]:
+                    data.update(
+                        {
+                            "chunk_rows": int(gpu_compress_chunk_rows),
+                            "chunk_mb": gpu_compress_chunk_mb,
+                        }
+                    )
+                _log_event(
+                    out_dir,
+                    "gpu",
+                    "GPU used for sparse-plus-low-rank thresholding",
+                    data=data,
+                )
+            return result
+        except Exception as exc:  # pragma: no cover - runtime fallback
+            if use_gpu_flag:
+                _log_event(
+                    out_dir,
+                    "gpu",
+                    "GPU compression failed, falling back to CPU",
+                    level="warning",
+                    data={"error": str(exc)},
+                )
+                return get_sparse_plus_low_rank(
+                    A=A_full,
+                    threshold_perc=threshold_perc,
+                    rank=rank,
+                    xp=None,
+                )
+            raise
     _stage_begin("compress", "Building compressed representation")
+    if gpu_enabled and compress_mode != "sparse-plus-low-rank" and step not in ("svd",):
+        _log_event(
+            out_dir,
+            "gpu",
+            "GPU compression not supported for this mode; using CPU",
+            data={"compress_mode": compress_mode, "step": step},
+        )
     if step == "sparse":
         S_sparse = get_sparse_only(A=A_full, threshold_perc=threshold_perc, compression="rmr")
         info = {"sparse": _matrix_info(S_sparse)}
@@ -889,7 +998,7 @@ def run_compressrtp(
         timing["compress_rss_mb"] = _rss_mb()
         return _finish_step("sparse", info)
     if step == "svd":
-        S, H, W = get_sparse_plus_low_rank(A=A_full, threshold_perc=threshold_perc, rank=rank)
+        S, H, W = _build_sparse_plus_low_rank(gpu_enabled)
         info = {
             "sparse": _matrix_info(S),
             "H_shape": list(H.shape),
@@ -921,7 +1030,7 @@ def run_compressrtp(
         opt = pp.Optimization(my_plan, inf_matrix=inf_matrix, opt_params=opt_params)
         opt.create_cvxpy_problem()
     elif compress_mode == "sparse-plus-low-rank":
-        S, H, W = get_sparse_plus_low_rank(A=A_full, threshold_perc=threshold_perc, rank=rank)
+        S, H, W = _build_sparse_plus_low_rank(gpu_enabled)
         compress_info = {
             "sparse": _matrix_info(S),
             "H_shape": list(H.shape),
@@ -961,7 +1070,38 @@ def run_compressrtp(
     _stage_begin("optimization", "Running optimization")
     t_opt_start = time.perf_counter()
     sol = opt.solve(**solve_kwargs)
-    dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
+    t_dose_start = time.perf_counter()
+    if gpu_enabled:
+        chunk_rows = estimate_chunk_rows(A_full, gpu_chunk_mb)
+        if chunk_rows is not None and chunk_rows < A_full.shape[0]:
+            _log_event(
+                out_dir,
+                "gpu",
+                "Using chunked GPU matmul for dose",
+                data={"chunk_rows": int(chunk_rows), "chunk_mb": gpu_chunk_mb},
+            )
+        try:
+            dose_1d = gpu_matmul(
+                A_full,
+                sol["optimal_intensity"],
+                xp=gpu_modules["xp"],
+                sparse_module=gpu_modules["sparse"],
+                max_chunk_mb=gpu_chunk_mb,
+            )
+            dose_1d = dose_1d * num_fractions
+            _log_event(out_dir, "gpu", "Dose computed on GPU", data={"stage": "dose_1d"})
+        except Exception as exc:  # pragma: no cover - depends on GPU state
+            _log_event(
+                out_dir,
+                "gpu",
+                "GPU dose computation failed; using CPU",
+                level="warning",
+                data={"error": str(exc)},
+            )
+            dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
+    else:
+        dose_1d = (A_full @ sol["optimal_intensity"]) * num_fractions
+    timing["dose_1d_sec"] = time.perf_counter() - t_dose_start
     timing["optimization_sec"] = time.perf_counter() - t_opt_start
     timing["optimization_rss_mb"] = _rss_mb()
     _stage_end("optimization", f"Optimization finished in {timing['optimization_sec']:.2f}s")
@@ -1042,6 +1182,20 @@ def run_compressrtp(
     timing["evaluation_sec"] = time.perf_counter() - t_eval_start
     timing["evaluation_rss_mb"] = _rss_mb()
     _stage_end("evaluation", f"Evaluation finished in {timing['evaluation_sec']:.2f}s")
+    try:
+        try:
+            from backend.plan_score.score import compute_plan_score_for_run
+        except ImportError:
+            from plan_score.score import compute_plan_score_for_run
+        plan_score = compute_plan_score_for_run(out_dir, protocol_name)
+        _write_json(out_dir / "plan_score.json", plan_score)
+    except Exception as exc:
+        _log_event(
+            out_dir,
+            "plan_score",
+            f"Plan score not generated: {exc}",
+            level="warning",
+        )
 
     pp.save_optimal_sol(sol=sol, sol_name="sol_step1.pkl", path=str(out_dir))
     pp.save_plan(my_plan, "my_plan.pkl", path=str(out_dir))
@@ -1120,6 +1274,11 @@ def main() -> None:
         help="Very fast run (planner beams + skip CG + fewer SCP iterations + sparse influence matrix).",
     )
     parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable GPU acceleration for supported CompressRTP steps.",
+    )
+    parser.add_argument(
         "--use-planner-beams",
         action="store_true",
         help="Use PlannerBeams.json beam IDs when available.",
@@ -1184,6 +1343,7 @@ def main() -> None:
         step=args.step,
         fast=args.fast,
         super_fast=super_fast,
+        use_gpu=args.gpu,
         tag=args.tag,
         adapter=adapter,
     )

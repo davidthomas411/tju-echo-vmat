@@ -2,13 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-const CASE_OPTIONS = [
-  { id: "Lung_Patient_11", label: "Lung Patient 11" },
-  { id: "Lung_Patient_4", label: "Lung Patient 4" },
-  { id: "Lung_Patient_2", label: "Lung Patient 2" },
-  { id: "Lung_Phantom_Patient_1", label: "Lung Phantom Patient 1" },
-];
-
 const PRESETS = [
   { id: "super_fast", label: "Super Fast" },
   { id: "fast", label: "Safe (low memory)" },
@@ -198,6 +191,56 @@ function safeArrayMax(values) {
     }
   }
   return max;
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "--";
+  }
+  return `${value.toFixed(1)}%`;
+}
+
+function percentileColor(value) {
+  const clamped = Math.min(100, Math.max(0, Number(value) || 0));
+  const hue = (clamped / 100) * 120;
+  return `hsl(${hue}, 70%, 50%)`;
+}
+
+function buildHistogram(values, binCount) {
+  if (!values.length || binCount <= 0) {
+    return { bins: [], max: 0, min: 0 };
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const bins = Array.from({ length: binCount }, () => 0);
+  values.forEach((value) => {
+    const idx = Math.min(binCount - 1, Math.floor(((value - min) / span) * binCount));
+    bins[idx] += 1;
+  });
+  return { bins, min, max, maxCount: Math.max(...bins) };
+}
+
+function polarPoint(cx, cy, radius, angle) {
+  return {
+    x: cx + radius * Math.cos(angle),
+    y: cy + radius * Math.sin(angle),
+  };
+}
+
+function arcPath(cx, cy, innerR, outerR, startAngle, endAngle) {
+  const startOuter = polarPoint(cx, cy, outerR, endAngle);
+  const endOuter = polarPoint(cx, cy, outerR, startAngle);
+  const startInner = polarPoint(cx, cy, innerR, startAngle);
+  const endInner = polarPoint(cx, cy, innerR, endAngle);
+  const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
+  return [
+    `M ${startOuter.x} ${startOuter.y}`,
+    `A ${outerR} ${outerR} 0 ${largeArc} 0 ${endOuter.x} ${endOuter.y}`,
+    `L ${startInner.x} ${startInner.y}`,
+    `A ${innerR} ${innerR} 0 ${largeArc} 1 ${endInner.x} ${endInner.y}`,
+    "Z",
+  ].join(" ");
 }
 
 function arraysEqual(a, b) {
@@ -495,9 +538,116 @@ function DvhPlot({ series, onHover }) {
   );
 }
 
+function DaisyPlot({ score, objectives }) {
+  if (!objectives || !objectives.length) {
+    return <div className="placeholder">Plan score not available yet.</div>;
+  }
+  const size = 360;
+  const center = size / 2;
+  const inner = 58;
+  const outer = 150;
+  const slice = (Math.PI * 2) / objectives.length;
+
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} width="100%" height="360" className="daisy">
+      <circle cx={center} cy={center} r={inner} fill="rgba(15,23,42,0.7)" stroke="rgba(148,163,184,0.3)" />
+      {objectives.map((obj, idx) => {
+        const baseAngle = -Math.PI / 2 + idx * slice;
+        const endAngle = baseAngle + slice * 0.92;
+        const pct = obj?.percentile ?? 0;
+        const radius = inner + ((outer - inner) * Math.max(0, Math.min(100, pct))) / 100;
+        const path = arcPath(center, center, inner, radius, baseAngle, endAngle);
+        const fill = percentileColor(pct);
+        const opacity = obj.priority === 1 ? 0.85 : obj.priority === 2 ? 0.65 : 0.45;
+        const mid = baseAngle + (endAngle - baseAngle) / 2;
+        const labelPoint = polarPoint(center, center, outer + 16, mid);
+        const label = obj.label?.replace(/\s*\(.*\)/, "") || obj.structure || `Obj ${idx + 1}`;
+        const targetPct = obj.target_percentile;
+        const targetRadius =
+          targetPct !== null && targetPct !== undefined
+            ? inner + ((outer - inner) * Math.max(0, Math.min(100, targetPct))) / 100
+            : null;
+        const targetPoint = targetRadius ? polarPoint(center, center, targetRadius, mid) : null;
+        return (
+          <g key={obj.id || idx}>
+            <path d={path} fill={fill} fillOpacity={opacity} stroke="rgba(148,163,184,0.35)" />
+            {targetPoint ? (
+              <circle cx={targetPoint.x} cy={targetPoint.y} r="3.5" fill="#f8fafc" stroke="#0f172a" />
+            ) : null}
+            <text
+              x={labelPoint.x}
+              y={labelPoint.y}
+              fontSize="10"
+              fill="#e2e8f0"
+              textAnchor={labelPoint.x < center ? "end" : "start"}
+            >
+              {label}
+            </text>
+          </g>
+        );
+      })}
+      <text x={center} y={center - 6} textAnchor="middle" fontSize="12" fill="#94a3b8">
+        Plan Score
+      </text>
+      <text x={center} y={center + 18} textAnchor="middle" fontSize="24" fill="#e2e8f0">
+        {score?.plan_score ? score.plan_score.toFixed(1) : "--"}
+      </text>
+      <text x={center} y={center + 36} textAnchor="middle" fontSize="11" fill="#94a3b8">
+        {score?.plan_percentile ? `${score.plan_percentile.toFixed(1)}%ile` : "--"}
+      </text>
+    </svg>
+  );
+}
+
+function PopulationHistogram({ values, marker }) {
+  const width = 560;
+  const height = 160;
+  const padding = 24;
+  const { bins, min, max, maxCount } = buildHistogram(values, 12);
+  const barWidth = bins.length ? (width - padding * 2) / bins.length : 0;
+  const markerX =
+    marker !== null && marker !== undefined && max > min
+      ? padding + ((marker - min) / (max - min)) * (width - padding * 2)
+      : null;
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="population-histogram">
+      <rect x="0" y="0" width={width} height={height} rx="12" fill="rgba(15, 23, 42, 0.6)" />
+      {bins.map((count, idx) => {
+        const barHeight = maxCount ? (count / maxCount) * (height - padding * 2) : 0;
+        const x = padding + idx * barWidth;
+        const y = height - padding - barHeight;
+        return (
+          <rect
+            key={`bin-${idx}`}
+            x={x + 1}
+            y={y}
+            width={barWidth - 2}
+            height={barHeight}
+            rx="4"
+            fill="rgba(96, 165, 250, 0.8)"
+          />
+        );
+      })}
+      {markerX !== null ? (
+        <line x1={markerX} x2={markerX} y1={padding} y2={height - padding} stroke="#f97316" strokeWidth="2" />
+      ) : null}
+      <text x={padding} y={height - 6} fill="#94a3b8" fontSize="11">
+        {min.toFixed(1)}
+      </text>
+      <text x={width - padding} y={height - 6} fill="#94a3b8" fontSize="11" textAnchor="end">
+        {max.toFixed(1)}
+      </text>
+    </svg>
+  );
+}
+
 export default function HomePage() {
-  const [caseId, setCaseId] = useState(CASE_OPTIONS[0].id);
+  const [caseOptions, setCaseOptions] = useState([]);
+  const [caseFilter, setCaseFilter] = useState("");
+  const [caseId, setCaseId] = useState("");
   const [protocol, setProtocol] = useState("Lung_2Gy_30Fx");
+  const [activeTab, setActiveTab] = useState("workbench");
   const [preset, setPreset] = useState("super_fast");
   const [optimizer, setOptimizer] = useState("echo-vmat");
   const [compressMode, setCompressMode] = useState("sparse-only");
@@ -505,6 +655,7 @@ export default function HomePage() {
   const [thresholdPerc, setThresholdPerc] = useState(10);
   const [rank, setRank] = useState(5);
   const [beamCount, setBeamCount] = useState("");
+  const [useGpu, setUseGpu] = useState(false);
   const [tag, setTag] = useState("");
   const [availableRuns, setAvailableRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -519,6 +670,12 @@ export default function HomePage() {
   const [dvhImageUrl, setDvhImageUrl] = useState("");
   const [dvhData, setDvhData] = useState(null);
   const [dvhHover, setDvhHover] = useState(null);
+  const [planScore, setPlanScore] = useState(null);
+  const [planScoreStatus, setPlanScoreStatus] = useState("idle");
+  const [populationScores, setPopulationScores] = useState([]);
+  const [populationStats, setPopulationStats] = useState(null);
+  const [populationStatus, setPopulationStatus] = useState("idle");
+  const [populationFilter, setPopulationFilter] = useState("");
   const [compareRunA, setCompareRunA] = useState("");
   const [compareRunB, setCompareRunB] = useState("");
   const [compareDvhA, setCompareDvhA] = useState(null);
@@ -554,6 +711,59 @@ export default function HomePage() {
 
   const apiBase = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
+  useEffect(() => {
+    let isMounted = true;
+    fetch(`${apiBase}/patients?protocol=${encodeURIComponent(protocol)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (!isMounted || !payload) {
+          return;
+        }
+        const patients = payload.patients || [];
+        const options = patients.map((id) => ({
+          id,
+          label: id.replaceAll("_", " "),
+        }));
+        setCaseOptions(options);
+        if (!caseId || !patients.includes(caseId)) {
+          setCaseId(patients[0] || "");
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setCaseOptions([]);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [apiBase, protocol]);
+
+  useEffect(() => {
+    if (activeTab !== "population") {
+      return;
+    }
+    setPopulationStatus("loading");
+    fetch(`${apiBase}/plan-score/population?protocol=${encodeURIComponent(protocol)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (!payload) {
+          setPopulationScores([]);
+          setPopulationStats(null);
+          setPopulationStatus("error");
+          return;
+        }
+        setPopulationScores(payload.patients || []);
+        setPopulationStats(payload.stats || null);
+        setPopulationStatus("ready");
+      })
+      .catch(() => {
+        setPopulationScores([]);
+        setPopulationStats(null);
+        setPopulationStatus("error");
+      });
+  }, [apiBase, protocol, activeTab]);
+
   async function refreshRuns() {
     try {
       const response = await fetch(`${apiBase}/runs`);
@@ -571,6 +781,42 @@ export default function HomePage() {
     }
   }
 
+  const filteredCaseOptions = useMemo(() => {
+    const query = caseFilter.trim().toLowerCase();
+    let filtered = caseOptions;
+    if (query) {
+      filtered = caseOptions.filter((option) => option.label.toLowerCase().includes(query));
+    }
+    if (caseId && !filtered.some((option) => option.id === caseId)) {
+      const selected = caseOptions.find((option) => option.id === caseId);
+      if (selected) {
+        return [selected, ...filtered];
+      }
+    }
+    return filtered;
+  }, [caseOptions, caseFilter, caseId]);
+
+  const filteredPopulationScores = useMemo(() => {
+    const query = populationFilter.trim().toLowerCase();
+    if (!query) {
+      return populationScores;
+    }
+    return populationScores.filter((entry) => entry.case_id?.toLowerCase().includes(query));
+  }, [populationScores, populationFilter]);
+
+  const runScoreByPatient = useMemo(() => {
+    const map = new Map();
+    availableRuns.forEach((run) => {
+      if (!run.case_id || !run.plan_score?.plan_score) {
+        return;
+      }
+      if (!map.has(run.case_id)) {
+        map.set(run.case_id, run.plan_score);
+      }
+    });
+    return map;
+  }, [availableRuns]);
+
   async function startRun() {
     setError(null);
     setEvents([]);
@@ -581,6 +827,8 @@ export default function HomePage() {
     setDvhImageUrl("");
     setDvhData(null);
     setDvhHover(null);
+    setPlanScore(null);
+    setPlanScoreStatus("idle");
     setCtMeta(null);
     setCtSliceIndex(0);
     setStructures([]);
@@ -622,6 +870,7 @@ export default function HomePage() {
           const capped = Math.min(parsedCount, 37);
           payload.beam_ids = Array.from({ length: capped }, (_, idx) => idx);
         }
+        payload.use_gpu = useGpu;
         if (compressStep && compressStep !== "all") {
           payload.step = compressStep;
         }
@@ -657,6 +906,8 @@ export default function HomePage() {
     setDvhImageUrl("");
     setDvhData(null);
     setDvhHover(null);
+    setPlanScore(null);
+    setPlanScoreStatus("idle");
     setCtMeta(null);
     setCtSliceIndex(0);
     setStructures([]);
@@ -1021,6 +1272,33 @@ export default function HomePage() {
       .catch(() => setDvhData(null));
   }, [apiBase, runId, artifacts, dvhData]);
 
+  useEffect(() => {
+    if (!runId) {
+      setPlanScore(null);
+      setPlanScoreStatus("idle");
+      return;
+    }
+    if (status?.state !== "completed" && !artifacts.includes("plan_score.json")) {
+      return;
+    }
+    setPlanScoreStatus("loading");
+    fetch(`${apiBase}/runs/${runId}/plan-score`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (payload) {
+          setPlanScore(payload);
+          setPlanScoreStatus("ready");
+        } else {
+          setPlanScore(null);
+          setPlanScoreStatus("idle");
+        }
+      })
+      .catch(() => {
+        setPlanScore(null);
+        setPlanScoreStatus("error");
+      });
+  }, [apiBase, runId, status?.state, artifacts]);
+
   const structureNames = useMemo(() => {
     const names = new Set();
     [dvhData, compareDvhA, compareDvhB].forEach((dataset) => {
@@ -1209,12 +1487,28 @@ export default function HomePage() {
         <div className="toolbar">
           <div className="toolbar-group">
             <label htmlFor="case">Case</label>
-            <select id="case" value={caseId} onChange={(event) => setCaseId(event.target.value)}>
-              {CASE_OPTIONS.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label}
-                </option>
-              ))}
+            <input
+              id="case-filter"
+              type="text"
+              placeholder="Search patients"
+              value={caseFilter}
+              onChange={(event) => setCaseFilter(event.target.value)}
+            />
+            <select
+              id="case"
+              value={caseId}
+              onChange={(event) => setCaseId(event.target.value)}
+              disabled={!caseOptions.length}
+            >
+              {filteredCaseOptions.length ? (
+                filteredCaseOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))
+              ) : (
+                <option value="">No patients loaded</option>
+              )}
             </select>
           </div>
           <span className={`status-pill ${status?.state === "error" ? "error" : ""}`}>
@@ -1228,14 +1522,33 @@ export default function HomePage() {
           <button className="btn btn-ghost" onClick={() => loadRun(selectedRunId)}>
             Load Run
           </button>
-          <button className="btn btn-primary" onClick={startRun} disabled={isRunning}>
+          <button className="btn btn-primary" onClick={startRun} disabled={isRunning || !caseId}>
             {isRunning ? "Running" : "Run Example"}
           </button>
         </div>
       </header>
 
+      <div className="tabbar">
+        <button
+          type="button"
+          className={`tab ${activeTab === "workbench" ? "active" : ""}`}
+          onClick={() => setActiveTab("workbench")}
+        >
+          Workbench
+        </button>
+        <button
+          type="button"
+          className={`tab ${activeTab === "population" ? "active" : ""}`}
+          onClick={() => setActiveTab("population")}
+        >
+          Plan Score Population
+        </button>
+      </div>
+
       <main className="dashboard">
-        <section className="panel">
+        {activeTab === "workbench" ? (
+          <>
+            <section className="panel">
           <div className="card">
             <div className="card-header">
               <div>
@@ -1529,6 +1842,11 @@ export default function HomePage() {
                         {run.case_id || run.status?.case_id || "unknown"}
                       </span>
                       <span>{run.run_type || "echo-vmat"} · {run.status?.state || "unknown"}</span>
+                      <span>
+                        {Number.isFinite(run.plan_score?.plan_score)
+                          ? `Score ${run.plan_score.plan_score.toFixed(1)}`
+                          : ""}
+                      </span>
                     </div>
                   </div>
                 ))
@@ -1615,6 +1933,17 @@ export default function HomePage() {
                   <div style={{ color: "#94a3b8", fontSize: "12px" }}>
                     Start with 3 for quick DDC checks; use 7 for closer planner behavior.
                   </div>
+                  <label>GPU (optional)</label>
+                  <button
+                    type="button"
+                    className={`btn btn-toggle ${useGpu ? "active" : ""}`}
+                    onClick={() => setUseGpu((prev) => !prev)}
+                  >
+                    {useGpu ? "GPU enabled" : "GPU off"}
+                  </button>
+                  <div style={{ color: "#94a3b8", fontSize: "12px" }}>
+                    Uses GPU for supported matrix ops only; solver remains CPU.
+                  </div>
                   {compressMode === "sparse-plus-low-rank" ? (
                     <>
                       <label htmlFor="rank">Low-rank k</label>
@@ -1667,7 +1996,10 @@ export default function HomePage() {
                 {availableRuns.map((run) => (
                   <option key={run.run_id} value={run.run_id}>
                     {run.run_id} ({run.run_type || "echo-vmat"} · {run.status?.state || "unknown"}
-                    {run.tag ? ` · ${run.tag}` : ""})
+                    {run.tag ? ` · ${run.tag}` : ""}
+                    {Number.isFinite(run.plan_score?.plan_score)
+                      ? ` · Score ${run.plan_score.plan_score.toFixed(1)}`
+                      : ""})
                   </option>
                 ))}
               </select>
@@ -1747,6 +2079,67 @@ export default function HomePage() {
             ) : dvhImageUrl ? (
               <div className="card-subtitle">Static snapshot available in artifacts.</div>
             ) : null}
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <div className="card-title">Plan Score (Population-Based)</div>
+                <div className="card-subtitle">Percentile scoring across 99 lung plans</div>
+              </div>
+              <span className={`status-pill ${planScoreStatus === "error" ? "error" : ""}`}>
+                {planScoreStatus}
+              </span>
+            </div>
+            {planScore ? (
+              <div className="plan-score-grid">
+                <div className="plan-score-daisy">
+                  <DaisyPlot score={planScore} objectives={planScore.objectives || []} />
+                </div>
+                <div className="plan-score-table">
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Objective</th>
+                          <th>Value</th>
+                          <th>Percentile</th>
+                          <th>Target</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(planScore.objectives || []).map((obj) => (
+                          <tr key={obj.id}>
+                            <td>{obj.label}</td>
+                            <td>
+                              {obj.value !== null && obj.value !== undefined
+                                ? `${obj.value.toFixed(2)} ${obj.unit}`
+                                : "--"}
+                            </td>
+                            <td className="metric-percent">
+                              {obj.percentile !== null && obj.percentile !== undefined
+                                ? formatPercent(obj.percentile)
+                                : "--"}
+                            </td>
+                            <td>
+                              {obj.target_value !== null && obj.target_value !== undefined
+                                ? `${obj.target_value} ${obj.unit}`
+                                : "--"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="placeholder">
+                {planScoreStatus === "loading"
+                  ? "Scoring plan against population..."
+                  : "Plan score not available yet."}
+              </div>
+            )}
           </div>
 
           <div className="card">
@@ -1951,6 +2344,137 @@ export default function HomePage() {
             ) : null}
           </div>
         </section>
+          </>
+        ) : null}
+
+        {activeTab === "population" ? (
+          <section className="panel">
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">Population Plan Score Variation</div>
+                  <div className="card-subtitle">Reference distribution across {populationScores.length || "--"} plans</div>
+                </div>
+                <span className={`status-pill ${populationStatus === "error" ? "error" : ""}`}>
+                  {populationStatus}
+                </span>
+              </div>
+              {populationScores.length ? (
+                <div className="population-grid">
+                  <div>
+                    <PopulationHistogram
+                      values={populationScores.map((entry) => entry.plan_score ?? 0)}
+                      marker={planScore?.plan_score ?? null}
+                    />
+                    <div className="population-legend">
+                      <span>Blue = reference plans</span>
+                      <span>Orange = selected run</span>
+                    </div>
+                  </div>
+                  <div className="population-stats">
+                    <div className="stat">
+                      <span>Mean</span>
+                      <strong>
+                        {Number.isFinite(populationStats?.mean) ? populationStats.mean.toFixed(2) : "--"}
+                      </strong>
+                    </div>
+                    <div className="stat">
+                      <span>Median</span>
+                      <strong>
+                        {Number.isFinite(populationStats?.median) ? populationStats.median.toFixed(2) : "--"}
+                      </strong>
+                    </div>
+                    <div className="stat">
+                      <span>P10</span>
+                      <strong>
+                        {Number.isFinite(populationStats?.p10) ? populationStats.p10.toFixed(2) : "--"}
+                      </strong>
+                    </div>
+                    <div className="stat">
+                      <span>P90</span>
+                      <strong>
+                        {Number.isFinite(populationStats?.p90) ? populationStats.p90.toFixed(2) : "--"}
+                      </strong>
+                    </div>
+                    <div className="stat">
+                      <span>Min</span>
+                      <strong>
+                        {Number.isFinite(populationStats?.min) ? populationStats.min.toFixed(2) : "--"}
+                      </strong>
+                    </div>
+                    <div className="stat">
+                      <span>Max</span>
+                      <strong>
+                        {Number.isFinite(populationStats?.max) ? populationStats.max.toFixed(2) : "--"}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="placeholder">
+                  {populationStatus === "loading"
+                    ? "Loading population scores..."
+                    : "Population scores not available."}
+                </div>
+              )}
+            </div>
+
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">Patient Plan Scores</div>
+                  <div className="card-subtitle">Reference RTDOSE plan score for each patient</div>
+                </div>
+              </div>
+              <div className="population-toolbar">
+                <input
+                  type="text"
+                  placeholder="Filter by patient ID"
+                  value={populationFilter}
+                  onChange={(event) => setPopulationFilter(event.target.value)}
+                />
+                <div className="population-count">
+                  Showing {filteredPopulationScores.length} / {populationScores.length}
+                </div>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Patient</th>
+                      <th>Reference Score</th>
+                      <th>Percentile</th>
+                      <th>Latest Run Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredPopulationScores.length ? (
+                      filteredPopulationScores.map((entry) => {
+                        const runScore = runScoreByPatient.get(entry.case_id);
+                        return (
+                          <tr key={entry.case_id}>
+                            <td>{entry.case_id}</td>
+                            <td>{Number.isFinite(entry.plan_score) ? entry.plan_score.toFixed(2) : "--"}</td>
+                            <td>{entry.percentile !== null ? formatPercent(entry.percentile) : "--"}</td>
+                            <td>
+                              {Number.isFinite(runScore?.plan_score) ? runScore.plan_score.toFixed(2) : "--"}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={4} className="placeholder">
+                          No patient scores found.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        ) : null}
       </main>
     </div>
   );

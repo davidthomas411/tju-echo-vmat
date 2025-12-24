@@ -95,6 +95,32 @@ body {
   border-radius: 999px;
 }
 
+.toolbar-group input {
+  width: 160px;
+}
+
+.tabbar {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.tab {
+  border-radius: 999px;
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  background: rgba(9, 16, 30, 0.7);
+  color: var(--muted);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: rgba(91, 188, 255, 0.2);
+  color: var(--text);
+  border-color: rgba(91, 188, 255, 0.5);
+}
+
 .status-pill {
   padding: 6px 12px;
   border-radius: 999px;
@@ -254,6 +280,85 @@ label {
   font-weight: 600;
 }
 
+.plan-score-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(280px, 1.1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.population-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.3fr) minmax(200px, 0.7fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.population-stats {
+  display: grid;
+  gap: 10px;
+}
+
+.population-stats .stat {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.population-legend {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.population-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.population-toolbar input {
+  max-width: 240px;
+}
+
+.population-count {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.population-histogram {
+  width: 100%;
+  height: auto;
+}
+
+.plan-score-daisy {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.daisy {
+  max-width: 360px;
+  height: auto;
+}
+
+.plan-score-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.metric-percent {
+  font-weight: 600;
+}
+
 .export-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -298,6 +403,8 @@ label {
 .run-meta {
   display: flex;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
   font-size: 12px;
   color: var(--muted);
 }

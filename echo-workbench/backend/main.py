@@ -1,9 +1,11 @@
 import asyncio
+import mimetypes
 import io
 import json
 import logging
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 from uuid import uuid4
@@ -12,7 +14,7 @@ import h5py
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -74,6 +76,7 @@ class RunRequest(BaseModel):
     rank: int = 5
     step: Optional[Literal["ddc", "sparse", "svd", "wavelet"]] = None
     beam_ids: Optional[list[int]] = None
+    use_gpu: bool = False
     tag: Optional[str] = None
 
 
@@ -117,12 +120,28 @@ def _read_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def _iter_file(path: Path, chunk_size: int = 1024 * 1024):
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
+
 def _run_roots() -> dict[str, Path]:
     return {"echo-vmat": RUNS_DIR, "compressrtp": RUNS_DIR_COMPRESS}
 
 
 def _batch_path(batch_id: str) -> Path:
     return BATCH_DIR / f"{batch_id}.json"
+
+
+def _safe_run_id(case_id: str, optimizer: str) -> str:
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_case = re.sub(r"[^A-Za-z0-9_-]+", "_", case_id or "case").strip("_")
+    suffix = uuid4().hex[:6]
+    return f"{optimizer}-{safe_case}-{ts}-{suffix}"
 
 
 def _write_batch_status(batch_id: str, payload: dict) -> None:
@@ -713,6 +732,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 step=req.step,
                 fast=req.fast,
                 super_fast=req.super_fast,
+                use_gpu=req.use_gpu,
                 tag=req.tag,
                 adapter=adapter,
             )
@@ -768,7 +788,7 @@ def _batch_worker(
 
 @app.post("/runs", response_model=RunResponse)
 def create_run(req: RunRequest) -> RunResponse:
-    run_id = uuid4().hex
+    run_id = _safe_run_id(req.case_id, req.optimizer)
     out_dir = RUNS_DIR_COMPRESS / run_id if req.optimizer == "compressrtp" else RUNS_DIR / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_json(
@@ -792,7 +812,7 @@ def create_batch(req: BatchRequest) -> BatchResponse:
         effective_tag = run_req.tag or req.label
         if effective_tag != run_req.tag:
             run_req = run_req.model_copy(update={"tag": effective_tag})
-        run_id = uuid4().hex
+        run_id = _safe_run_id(run_req.case_id, run_req.optimizer)
         out_dir = RUNS_DIR_COMPRESS / run_id if run_req.optimizer == "compressrtp" else RUNS_DIR / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
@@ -838,6 +858,14 @@ def list_runs() -> dict:
             status = _read_json(status_path) if status_path.exists() else {"state": "unknown"}
             config_path = path / "config.json"
             config = _read_json(config_path) if config_path.exists() else {}
+            plan_score_path = path / "plan_score.json"
+            plan_score = None
+            if plan_score_path.exists():
+                plan_payload = _read_json(plan_score_path)
+                plan_score = {
+                    "plan_score": plan_payload.get("plan_score"),
+                    "plan_percentile": plan_payload.get("plan_percentile"),
+                }
             runs.append(
                 {
                     "run_id": path.name,
@@ -848,6 +876,7 @@ def list_runs() -> dict:
                     "tag": config.get("tag") or status.get("tag"),
                     "started_at": status.get("started_at"),
                     "timestamp": path.stat().st_mtime,
+                    "plan_score": plan_score,
                 }
             )
     runs.sort(key=lambda item: item.get("timestamp", 0), reverse=True)
@@ -871,6 +900,52 @@ def get_run(run_id: str) -> dict:
         "protocol": config.get("protocol"),
         "tag": config.get("tag") or status.get("tag"),
     }
+
+
+@app.get("/patients")
+def list_patients(protocol: str = "Lung_2Gy_30Fx") -> dict:
+    try:
+        try:
+            from backend.plan_score.score import compute_population_summary
+        except ImportError:
+            from plan_score.score import compute_population_summary
+        summary = compute_population_summary(protocol)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    patients = [item.get("case_id") for item in summary.get("patients", []) if item.get("case_id")]
+    return {"protocol": protocol, "patients": patients}
+
+
+@app.get("/plan-score/population")
+def get_population_plan_scores(protocol: str = "Lung_2Gy_30Fx") -> dict:
+    try:
+        try:
+            from backend.plan_score.score import compute_population_summary
+        except ImportError:
+            from plan_score.score import compute_population_summary
+        return compute_population_summary(protocol)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/runs/{run_id}/plan-score")
+def get_plan_score(run_id: str) -> dict:
+    out_dir = _find_run_dir(run_id)
+    config = _load_run_config(run_id)
+    protocol = config.get("protocol") or "Lung_2Gy_30Fx"
+    plan_score_path = out_dir / "plan_score.json"
+    if plan_score_path.exists():
+        return _read_json(plan_score_path)
+    try:
+        try:
+            from backend.plan_score.score import compute_plan_score_for_run
+        except ImportError:
+            from plan_score.score import compute_plan_score_for_run
+        plan_score = compute_plan_score_for_run(out_dir, protocol)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _write_json(plan_score_path, plan_score)
+    return plan_score
 
 
 @app.get("/runs/{run_id}/events")
@@ -901,14 +976,19 @@ async def stream_events(run_id: str) -> StreamingResponse:
 
 
 @app.get("/runs/{run_id}/artifacts/{name}")
-def get_artifact(run_id: str, name: str) -> FileResponse:
+def get_artifact(run_id: str, name: str) -> StreamingResponse:
     out_dir = _find_run_dir(run_id)
     if Path(name).name != name:
         raise HTTPException(status_code=400, detail="invalid artifact name")
     path = out_dir / name
     if not path.exists():
         raise HTTPException(status_code=404, detail="artifact not found")
-    return FileResponse(path)
+    media_type, _ = mimetypes.guess_type(path.name)
+    return StreamingResponse(
+        _iter_file(path),
+        media_type=media_type or "application/octet-stream",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/runs/{run_id}/ct/meta")
@@ -932,7 +1012,7 @@ def get_ct_slice(
     index: int = Query(0, ge=0),
     window: float = Query(400.0, gt=0),
     level: float = Query(40.0),
-) -> Response:
+) -> StreamingResponse:
     case_dir, _config = _resolve_case_dir(run_id)
     _meta, ct_path, dataset = _ct_reference(case_dir)
     with h5py.File(ct_path, "r") as handle:
@@ -948,7 +1028,12 @@ def get_ct_slice(
     image = Image.fromarray(slice_u8, mode="L")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    return Response(content=buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+    content = buffer.getvalue()
+    return StreamingResponse(
+        iter([content]),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/runs/{run_id}/structures")
@@ -963,7 +1048,7 @@ def get_structure_slice(
     run_id: str,
     index: int = Query(0, ge=0),
     names: Optional[str] = Query(None),
-) -> Response:
+) -> StreamingResponse:
     case_dir, _config = _resolve_case_dir(run_id)
     entries = _structure_entries(case_dir)
     name_filter = None
@@ -1005,7 +1090,12 @@ def get_structure_slice(
     image = Image.fromarray(overlay, mode="RGBA")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    return Response(content=buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+    content = buffer.getvalue()
+    return StreamingResponse(
+        iter([content]),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/runs/{run_id}/rtplan")
@@ -1132,7 +1222,7 @@ def get_dose_slice(
     index: int = Query(0, ge=0),
     dose_min: float = Query(0.0, ge=0.0),
     dose_max: Optional[float] = Query(None),
-) -> Response:
+) -> StreamingResponse:
     out_dir = _find_run_dir(run_id)
     dose_path = out_dir / "dose_3d.npy"
     if not dose_path.exists():
@@ -1155,4 +1245,9 @@ def get_dose_slice(
     image = Image.fromarray(rgba, mode="RGBA")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    return Response(content=buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+    content = buffer.getvalue()
+    return StreamingResponse(
+        iter([content]),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
