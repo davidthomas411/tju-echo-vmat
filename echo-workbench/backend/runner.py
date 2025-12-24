@@ -341,6 +341,7 @@ def run_echo_example(
     solver: str = "MOSEK",
     use_planner_beams: bool = False,
     use_available_beams: bool = False,
+    beam_count: int | None = None,
     force_sparse: bool = False,
     super_fast: bool = False,
     opt_params_overrides: dict | None = None,
@@ -377,6 +378,7 @@ def run_echo_example(
         "optimizer": "echo-vmat",
         "use_planner_beams": use_planner_beams,
         "use_available_beams": use_available_beams,
+        "beam_count": beam_count,
         "force_sparse": force_sparse,
         "super_fast": super_fast,
         "adapter": case_info.source,
@@ -506,6 +508,11 @@ def run_echo_example(
     if beam_ids is None:
         beam_ids = list(range(37))
         _log_event(out_dir, "beams", "Using default beam IDs (0-36)")
+    if beam_count:
+        limit = int(beam_count)
+        if limit > 0 and len(beam_ids) > limit:
+            beam_ids = beam_ids[:limit]
+            _log_event(out_dir, "beams", f"Limiting beams to first {limit}")
     all_beam_ids = np.array(beam_ids)
     arcs_dict = {
         "arcs": [
@@ -816,6 +823,7 @@ def run_compressrtp(
     use_planner_beams: bool = False,
     use_available_beams: bool = False,
     beam_ids_override: list[int] | None = None,
+    beam_count: int | None = None,
     compress_mode: str = "sparse-only",
     threshold_perc: float = 10.0,
     rank: int = 5,
@@ -859,6 +867,11 @@ def run_compressrtp(
         threshold_perc = max(threshold_perc, 15.0)
         rank = min(rank, 2)
 
+    if beam_ids_override is None and beam_count:
+        limit = int(beam_count)
+        if limit > 0:
+            beam_ids_override = list(range(limit))
+
     step = None if step in (None, "all") else step
     run_config = {
         "case_id": case_id,
@@ -873,6 +886,7 @@ def run_compressrtp(
         "fast": fast,
         "super_fast": super_fast,
         "use_gpu": use_gpu,
+        "beam_count": beam_count,
         "adapter": case_info.source,
         "dataset_download_sec": float(case_info.download_seconds),
     }
@@ -1392,6 +1406,12 @@ def main() -> None:
         default=None,
         help="Comma-separated beam IDs override (e.g. 0,1,2).",
     )
+    parser.add_argument(
+        "--beam-count",
+        type=int,
+        default=None,
+        help="Limit number of beams (e.g. 3) after beam selection.",
+    )
     parser.add_argument("--adapter", default="example", choices=["example", "huggingface"])
     parser.add_argument("--hf-repo-id", default=None)
     parser.add_argument("--hf-token", default=None)
@@ -1435,6 +1455,7 @@ def main() -> None:
     force_sparse = args.force_sparse or args.fast or args.super_fast
     super_fast = args.super_fast
     beam_ids_override = _parse_beam_ids(args.beam_ids)
+    beam_count = args.beam_count
     adapter = None
     if args.adapter == "huggingface":
         try:
@@ -1458,6 +1479,7 @@ def main() -> None:
         solver=args.solver,
         use_planner_beams=use_planner_beams,
         use_available_beams=use_available_beams,
+        beam_count=beam_count,
         force_sparse=force_sparse,
         super_fast=super_fast,
         opt_params_overrides=opt_params_overrides,
@@ -1472,6 +1494,7 @@ def main() -> None:
         use_planner_beams=use_planner_beams,
         use_available_beams=use_available_beams,
         beam_ids_override=beam_ids_override,
+        beam_count=beam_count,
         compress_mode=args.compress_mode,
         threshold_perc=args.threshold_perc,
         rank=args.rank,

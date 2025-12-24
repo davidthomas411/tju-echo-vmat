@@ -119,6 +119,7 @@ UI notes:
 - The "Safe (low memory)" preset uses planner beams + sparse matrix to reduce RAM.
 - Batch runs (sequential queue): POST `/runs/batch` and poll `/runs/batch/{batch_id}`.
 - Use the Parameter Sweep card to launch a batch of runs with opt-parameter overrides.
+- All runs are currently capped to 3 beams (memory-safe). Update `BEAM_LIMIT` in `echo-workbench/frontend/app/page.js` or send `beam_count` via API to change.
 
 Parameter sweeps (ECHO-VMAT):
 - Source config file: `echo-workbench/echo-vmat/echo_vmat/config_files/<protocol>_opt_params.json`
@@ -131,6 +132,7 @@ Parameter sweeps (ECHO-VMAT):
 python echo-workbench/backend/runner.py \
   --case-id Lung_Patient_11 \
   --protocol Lung_2Gy_30Fx \
+  --beam-count 3 \
   --opt-params-overrides @/path/to/overrides.json
 ```
 - API example (batch sweep):
@@ -138,9 +140,9 @@ python echo-workbench/backend/runner.py \
 curl -X POST http://127.0.0.1:8000/runs/batch \
   -H "Content-Type: application/json" \
   -d '{"label":"sweep-target","runs":[
-        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","opt_params_overrides":{"objective_weight_scale":{"target":0.8}},"tag":"target=0.8"},
-        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","opt_params_overrides":{"objective_weight_scale":{"target":1.0}},"tag":"target=1.0"},
-        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","opt_params_overrides":{"objective_weight_scale":{"target":1.2}},"tag":"target=1.2"}
+        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","beam_count":3,"opt_params_overrides":{"objective_weight_scale":{"target":0.8}},"tag":"target=0.8"},
+        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","beam_count":3,"opt_params_overrides":{"objective_weight_scale":{"target":1.0}},"tag":"target=1.0"},
+        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","beam_count":3,"opt_params_overrides":{"objective_weight_scale":{"target":1.2}},"tag":"target=1.2"}
       ]}'
 ```
 

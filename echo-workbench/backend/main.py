@@ -76,6 +76,7 @@ class RunRequest(BaseModel):
     rank: int = 5
     step: Optional[Literal["ddc", "sparse", "svd", "wavelet"]] = None
     beam_ids: Optional[list[int]] = None
+    beam_count: Optional[int] = None
     use_gpu: bool = False
     tag: Optional[str] = None
     opt_params_overrides: Optional[dict[str, Any]] = None
@@ -727,6 +728,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 use_planner_beams=use_planner_beams,
                 use_available_beams=use_available_beams,
                 beam_ids_override=req.beam_ids,
+                beam_count=req.beam_count,
                 compress_mode=req.compress_mode,
                 threshold_perc=req.threshold_perc,
                 rank=req.rank,
@@ -748,6 +750,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 use_available_beams=use_available_beams,
                 force_sparse=force_sparse,
                 super_fast=req.super_fast,
+                beam_count=req.beam_count,
                 opt_params_overrides=req.opt_params_overrides,
                 tag=req.tag,
                 adapter=adapter,

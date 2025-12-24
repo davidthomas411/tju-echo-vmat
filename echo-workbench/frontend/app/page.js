@@ -27,6 +27,8 @@ const COMPRESS_STEPS = [
   { id: "wavelet", label: "Wavelet Basis" },
 ];
 
+const BEAM_LIMIT = 3;
+
 const SWEEP_PRESETS = [
   {
     id: "target-weight",
@@ -152,6 +154,32 @@ function formatNumber(value) {
     return "--";
   }
   return Number(value).toFixed(1);
+}
+
+function parseSweepTag(tag) {
+  if (!tag) {
+    return null;
+  }
+  const parts = String(tag)
+    .split("|")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const candidate = parts.find((part) => part.includes("=")) || parts[0];
+  if (!candidate || !candidate.includes("=")) {
+    return null;
+  }
+  const [label, value] = candidate.split("=");
+  if (!label || value === undefined) {
+    return null;
+  }
+  const valueText = value.trim();
+  const numeric = Number.parseFloat(valueText);
+  return {
+    label: label.trim(),
+    value: valueText,
+    numeric: Number.isFinite(numeric) ? numeric : null,
+    raw: candidate.trim(),
+  };
 }
 
 function extractPlanValue(raw) {
@@ -702,7 +730,7 @@ export default function HomePage() {
   const [compressStep, setCompressStep] = useState("all");
   const [thresholdPerc, setThresholdPerc] = useState(10);
   const [rank, setRank] = useState(5);
-  const [beamCount, setBeamCount] = useState("");
+  const [beamCount, setBeamCount] = useState(String(BEAM_LIMIT));
   const [useGpu, setUseGpu] = useState(false);
   const [tag, setTag] = useState("");
   const [sweepPreset, setSweepPreset] = useState(SWEEP_PRESETS[0]?.id || "");
@@ -911,6 +939,47 @@ export default function HomePage() {
     });
   }, [availableRuns, caseFilter, caseId, caseRuns]);
 
+  const sweepGroups = useMemo(() => {
+    const groups = new Map();
+    caseRuns.forEach((run) => {
+      const parsed = parseSweepTag(run.tag);
+      if (!parsed) {
+        return;
+      }
+      const key = parsed.label.toLowerCase();
+      if (!groups.has(key)) {
+        groups.set(key, { label: parsed.label, runs: [] });
+      }
+      const scoreValue = Number.isFinite(run.plan_score?.plan_score) ? run.plan_score.plan_score : null;
+      const percentile = Number.isFinite(run.plan_score?.plan_percentile)
+        ? run.plan_score.plan_percentile
+        : null;
+      groups.get(key).runs.push({
+        run_id: run.run_id,
+        tag: run.tag || "",
+        status: run.status?.state || "unknown",
+        optimizer: run.run_type || "echo-vmat",
+        value: parsed.value,
+        numeric: parsed.numeric,
+        score: scoreValue,
+        percentile,
+      });
+    });
+    return Array.from(groups.values())
+      .map((group) => {
+        const sortedRuns = [...group.runs].sort((a, b) => {
+          if (a.numeric !== null && b.numeric !== null) {
+            return a.numeric - b.numeric;
+          }
+          return String(a.value).localeCompare(String(b.value));
+        });
+        const scores = sortedRuns.map((item) => item.score).filter((score) => score !== null);
+        const bestScore = scores.length ? Math.max(...scores) : null;
+        return { ...group, runs: sortedRuns, bestScore };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [caseRuns]);
+
   const displayPlanScore = planScoreView === "reference" ? referenceScore : planScore;
   const displayPlanScoreStatus = planScoreView === "reference" ? referenceScoreStatus : planScoreStatus;
 
@@ -955,6 +1024,7 @@ export default function HomePage() {
         fast: preset === "fast",
         super_fast: preset === "super_fast",
         optimizer,
+        beam_count: BEAM_LIMIT,
         compress_mode: compressMode,
         threshold_perc: thresholdPerc,
         rank,
@@ -963,11 +1033,6 @@ export default function HomePage() {
         payload.tag = tag.trim();
       }
       if (optimizer === "compressrtp") {
-        const parsedCount = Number.parseInt(String(beamCount).trim(), 10);
-        if (Number.isFinite(parsedCount) && parsedCount > 0) {
-          const capped = Math.min(parsedCount, 37);
-          payload.beam_ids = Array.from({ length: capped }, (_, idx) => idx);
-        }
         payload.use_gpu = useGpu;
         if (compressStep && compressStep !== "all") {
           payload.step = compressStep;
@@ -1014,6 +1079,7 @@ export default function HomePage() {
         fast: preset === "fast",
         super_fast: preset === "super_fast",
         optimizer: "echo-vmat",
+        beam_count: BEAM_LIMIT,
       };
       const runs = activeSweep.values.map((value) => {
         const overrides = activeSweep.buildOverrides(value);
@@ -1792,6 +1858,13 @@ export default function HomePage() {
         >
           Plan Score Population
         </button>
+        <button
+          type="button"
+          className={`tab ${activeTab === "sweeps" ? "active" : ""}`}
+          onClick={() => setActiveTab("sweeps")}
+        >
+          Sweep Results
+        </button>
       </div>
 
       <main className="dashboard">
@@ -2169,18 +2242,18 @@ export default function HomePage() {
                       }
                     }}
                   />
-                  <label htmlFor="beam-count">Beam count (test)</label>
+                  <label htmlFor="beam-count">Beam count (locked)</label>
                   <input
                     id="beam-count"
                     type="number"
                     min="1"
                     max="37"
-                    placeholder="Leave blank for PlannerBeams.json"
                     value={beamCount}
+                    disabled
                     onChange={(event) => setBeamCount(event.target.value)}
                   />
                   <div style={{ color: "#94a3b8", fontSize: "12px" }}>
-                    Start with 3 for quick DDC checks; use 7 for closer planner behavior.
+                    All runs are capped to {BEAM_LIMIT} beams to stay within memory limits.
                   </div>
                   <label>GPU (optional)</label>
                   <button
@@ -2810,6 +2883,75 @@ export default function HomePage() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </section>
+        ) : null}
+
+        {activeTab === "sweeps" ? (
+          <section className="panel">
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">Parameter Sweep Results</div>
+                  <div className="card-subtitle">
+                    Runs tagged with sweep values for the selected patient
+                  </div>
+                </div>
+              </div>
+              {!caseId ? (
+                <div className="placeholder">Select a patient to view sweep runs.</div>
+              ) : sweepGroups.length === 0 ? (
+                <div className="placeholder">
+                  No sweep-tagged runs found for {caseId}. Use the Parameter Sweep card to launch a
+                  batch.
+                </div>
+              ) : (
+                <div style={{ display: "grid", gap: "16px" }}>
+                  {sweepGroups.map((group) => (
+                    <div className="card" key={group.label}>
+                      <div className="card-header">
+                        <div>
+                          <div className="card-title">{group.label}</div>
+                          <div className="card-subtitle">
+                            {group.runs.length} runs · Best score{" "}
+                            {group.bestScore !== null ? group.bestScore.toFixed(1) : "--"}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="table-wrap">
+                        <table className="metrics-table">
+                          <thead>
+                            <tr>
+                              <th>Value</th>
+                              <th>Score</th>
+                              <th>Percentile</th>
+                              <th>Optimizer</th>
+                              <th>Status</th>
+                              <th>Run</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {group.runs.map((run) => (
+                              <tr key={run.run_id}>
+                                <td>{run.value}</td>
+                                <td>{run.score !== null ? run.score.toFixed(1) : "--"}</td>
+                                <td>{run.percentile !== null ? formatPercent(run.percentile) : "--"}</td>
+                                <td>{run.optimizer}</td>
+                                <td>{run.status}</td>
+                                <td>
+                                  <button className="btn btn-ghost" onClick={() => loadRun(run.run_id)}>
+                                    {run.run_id}
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </section>
         ) : null}
