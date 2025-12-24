@@ -928,6 +928,18 @@ def get_population_plan_scores(protocol: str = "Lung_2Gy_30Fx") -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/plan-score/reference/{case_id}")
+def get_reference_plan_score(case_id: str, protocol: str = "Lung_2Gy_30Fx") -> dict:
+    try:
+        try:
+            from backend.plan_score.score import compute_reference_plan_score
+        except ImportError:
+            from plan_score.score import compute_reference_plan_score
+        return compute_reference_plan_score(case_id, protocol)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/runs/{run_id}/plan-score")
 def get_plan_score(run_id: str) -> dict:
     out_dir = _find_run_dir(run_id)

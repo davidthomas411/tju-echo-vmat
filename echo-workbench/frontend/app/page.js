@@ -672,6 +672,8 @@ export default function HomePage() {
   const [dvhHover, setDvhHover] = useState(null);
   const [planScore, setPlanScore] = useState(null);
   const [planScoreStatus, setPlanScoreStatus] = useState("idle");
+  const [referenceScore, setReferenceScore] = useState(null);
+  const [referenceScoreStatus, setReferenceScoreStatus] = useState("idle");
   const [populationScores, setPopulationScores] = useState([]);
   const [populationStats, setPopulationStats] = useState(null);
   const [populationStatus, setPopulationStatus] = useState("idle");
@@ -816,6 +818,18 @@ export default function HomePage() {
     });
     return map;
   }, [availableRuns]);
+
+  const filteredRuns = useMemo(() => {
+    const query = caseFilter.trim().toLowerCase();
+    if (!query) {
+      return availableRuns;
+    }
+    return availableRuns.filter((run) => {
+      const caseValue = (run.case_id || run.status?.case_id || "").toLowerCase();
+      const runIdValue = String(run.run_id || "").toLowerCase();
+      return caseValue.includes(query) || runIdValue.includes(query);
+    });
+  }, [availableRuns, caseFilter]);
 
   async function startRun() {
     setError(null);
@@ -1298,6 +1312,34 @@ export default function HomePage() {
         setPlanScoreStatus("error");
       });
   }, [apiBase, runId, status?.state, artifacts]);
+
+  useEffect(() => {
+    if (!caseId) {
+      setReferenceScore(null);
+      setReferenceScoreStatus("idle");
+      return;
+    }
+    setReferenceScoreStatus("loading");
+    fetch(
+      `${apiBase}/plan-score/reference/${encodeURIComponent(caseId)}?protocol=${encodeURIComponent(
+        protocol
+      )}`
+    )
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (!payload) {
+          setReferenceScore(null);
+          setReferenceScoreStatus("error");
+          return;
+        }
+        setReferenceScore(payload);
+        setReferenceScoreStatus("ready");
+      })
+      .catch(() => {
+        setReferenceScore(null);
+        setReferenceScoreStatus("error");
+      });
+  }, [apiBase, caseId, protocol]);
 
   const structureNames = useMemo(() => {
     const names = new Set();
@@ -1828,8 +1870,8 @@ export default function HomePage() {
               </div>
             </div>
             <div className="run-list">
-              {availableRuns.length ? (
-                availableRuns.map((run) => (
+              {filteredRuns.length ? (
+                filteredRuns.map((run) => (
                   <div
                     key={run.run_id}
                     className={`run-item ${runId === run.run_id ? "active" : ""}`}
@@ -1993,7 +2035,7 @@ export default function HomePage() {
                 onChange={(event) => setSelectedRunId(event.target.value)}
               >
                 <option value="">Select a run</option>
-                {availableRuns.map((run) => (
+                {filteredRuns.map((run) => (
                   <option key={run.run_id} value={run.run_id}>
                     {run.run_id} ({run.run_type || "echo-vmat"} · {run.status?.state || "unknown"}
                     {run.tag ? ` · ${run.tag}` : ""}
@@ -2091,6 +2133,35 @@ export default function HomePage() {
                 {planScoreStatus}
               </span>
             </div>
+            <div className="plan-score-summary">
+              <div className="summary-card">
+                <div className="summary-label">Selected Run</div>
+                <div className="summary-value">
+                  {Number.isFinite(planScore?.plan_score) ? planScore.plan_score.toFixed(1) : "--"}
+                </div>
+                <div className="summary-sub">
+                  Percentile:{" "}
+                  {Number.isFinite(planScore?.plan_percentile)
+                    ? formatPercent(planScore.plan_percentile)
+                    : "--"}
+                </div>
+              </div>
+              <div className="summary-card">
+                <div className="summary-label">Reference Plan</div>
+                <div className="summary-value">
+                  {Number.isFinite(referenceScore?.plan_score) ? referenceScore.plan_score.toFixed(1) : "--"}
+                </div>
+                <div className="summary-sub">
+                  {referenceScoreStatus === "loading"
+                    ? "Loading..."
+                    : `Percentile: ${
+                        Number.isFinite(referenceScore?.plan_percentile)
+                          ? formatPercent(referenceScore.plan_percentile)
+                          : "--"
+                      }`}
+                </div>
+              </div>
+            </div>
             {planScore ? (
               <div className="plan-score-grid">
                 <div className="plan-score-daisy">
@@ -2166,7 +2237,7 @@ export default function HomePage() {
                   onChange={(event) => setCompareRunA(event.target.value)}
                 >
                   <option value="">Select run</option>
-                  {availableRuns.map((run) => (
+                  {filteredRuns.map((run) => (
                     <option key={`a-${run.run_id}`} value={run.run_id}>
                       {run.run_id} ({run.run_type || "echo-vmat"}{run.tag ? ` · ${run.tag}` : ""})
                     </option>
@@ -2181,7 +2252,7 @@ export default function HomePage() {
                   onChange={(event) => setCompareRunB(event.target.value)}
                 >
                   <option value="">Select run</option>
-                  {availableRuns.map((run) => (
+                  {filteredRuns.map((run) => (
                     <option key={`b-${run.run_id}`} value={run.run_id}>
                       {run.run_id} ({run.run_type || "echo-vmat"}{run.tag ? ` · ${run.tag}` : ""})
                     </option>
@@ -2451,8 +2522,9 @@ export default function HomePage() {
                     {filteredPopulationScores.length ? (
                       filteredPopulationScores.map((entry) => {
                         const runScore = runScoreByPatient.get(entry.case_id);
+                        const isSelected = entry.case_id === caseId;
                         return (
-                          <tr key={entry.case_id}>
+                          <tr key={entry.case_id} className={isSelected ? "row-active" : ""}>
                             <td>{entry.case_id}</td>
                             <td>{Number.isFinite(entry.plan_score) ? entry.plan_score.toFixed(2) : "--"}</td>
                             <td>{entry.percentile !== null ? formatPercent(entry.percentile) : "--"}</td>

@@ -112,6 +112,7 @@ UI notes:
 - Toggle Dose Overlay in the CT viewer (fast, no recompute).
 - Use Run Comparison to overlay two DVHs and compute metric deltas.
 - Use the Plan Score Population tab to compare reference plan score distribution vs the selected run.
+- Use the top patient search bar to filter the run list to a single patient.
 - Patient list is populated from population DVH metadata; search + filter at the top.
 - Use the DICOM Exports panel to generate CT/RTSTRUCT and RTPLAN/RTDOSE.
 - Add a run tag to label experiments and comparisons.

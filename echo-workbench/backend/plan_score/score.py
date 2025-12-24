@@ -192,3 +192,69 @@ def compute_population_summary(protocol_name: str) -> dict[str, Any]:
         "stats": stats,
         "patients": records,
     }
+
+
+def compute_reference_plan_score(case_id: str, protocol_name: str) -> dict[str, Any]:
+    objectives = objectives_for_protocol(protocol_name)
+    population = _load_population(protocol_name)
+    patients = population.get("patients", [])
+    patient = next((item for item in patients if item.get("case_id") == case_id), None)
+    if patient is None:
+        raise FileNotFoundError(f"Case {case_id} not found in population metrics")
+
+    distributions = {obj.id: _sorted_values(population, obj) for obj in objectives}
+    objective_rows: list[dict[str, Any]] = []
+    scores = []
+    metrics = patient.get("metrics", {})
+
+    for obj in objectives:
+        value = metrics.get(obj.id)
+        percentile = (
+            _percentile_rank(distributions[obj.id], float(value))
+            if value is not None and distributions[obj.id]
+            else None
+        )
+        score = _score_from_percentile(percentile, obj.direction) if percentile is not None else None
+        if score is not None:
+            scores.append(max(score, 0.1) / 100.0)
+
+        target_val = _target_value(obj)
+        target_percentile = None
+        if target_val is not None and distributions[obj.id]:
+            target_pct = _percentile_rank(distributions[obj.id], float(target_val))
+            target_percentile = _score_from_percentile(target_pct, obj.direction)
+
+        objective_rows.append(
+            {
+                "id": obj.id,
+                "label": obj.label,
+                "structure": obj.structure,
+                "metric_type": obj.metric_type,
+                "value": value,
+                "unit": obj.unit,
+                "direction": obj.direction,
+                "percentile": score,
+                "target_value": target_val,
+                "target_percentile": target_percentile,
+                "goal": obj.goal,
+                "limit": obj.limit,
+                "priority": obj.priority,
+            }
+        )
+
+    plan_score = 0.0
+    if scores:
+        plan_score = exp(sum(log(value) for value in scores) / len(scores)) * 100.0
+
+    population_scores = population.get("population_scores") or compute_population_scores(population, objectives)
+    sorted_scores = sorted(population_scores) if population_scores else []
+    plan_percentile = _percentile_rank(sorted_scores, plan_score) if sorted_scores else None
+
+    return {
+        "protocol": protocol_name,
+        "case_id": case_id,
+        "plan_score": plan_score,
+        "plan_percentile": plan_percentile,
+        "population_count": len(patients),
+        "objectives": objective_rows,
+    }
