@@ -305,6 +305,14 @@ def _ensure_compressrtp_on_path() -> None:
         sys.path.insert(0, str(compress_root))
 
 
+def _ensure_mosek_license() -> None:
+    if os.environ.get("MOSEKLM_LICENSE_FILE"):
+        return
+    candidate = _repo_root().parent / "mosek.lic"
+    if candidate.exists():
+        os.environ["MOSEKLM_LICENSE_FILE"] = str(candidate)
+
+
 def _ensure_voxel_coordinates(inf_matrix: pp.InfluenceMatrix) -> None:
     if "voxel_coordinate_XYZ_mm" not in inf_matrix.opt_voxels_dict:
         coords = inf_matrix.get_voxel_coordinates()
@@ -349,6 +357,7 @@ def run_echo_example(
     adapter=None,
 ) -> Path:
     _ensure_echo_vmat_on_path()
+    _ensure_mosek_license()
     from echo_vmat.arcs import Arcs
     from echo_vmat.echo_vmat_optimization import EchoVmatOptimization
     from echo_vmat.echo_vmat_optimization_col_gen import EchoVmatOptimizationColGen
@@ -514,12 +523,19 @@ def run_echo_example(
             beam_ids = beam_ids[:limit]
             _log_event(out_dir, "beams", f"Limiting beams to first {limit}")
     all_beam_ids = np.array(beam_ids)
-    arcs_dict = {
-        "arcs": [
-            {"arc_id": "01", "beam_ids": all_beam_ids[0:int(len(all_beam_ids) / 2)]},
-            {"arc_id": "02", "beam_ids": all_beam_ids[int(len(all_beam_ids) / 2):]},
-        ]
-    }
+    if len(all_beam_ids) < 2:
+        raise ValueError("At least 2 beams are required to build VMAT arcs.")
+    if len(all_beam_ids) < 4:
+        arcs_dict = {"arcs": [{"arc_id": "01", "beam_ids": all_beam_ids}]}
+        _log_event(out_dir, "beams", f"Using single arc ({len(all_beam_ids)} beams)")
+    else:
+        split = int(len(all_beam_ids) / 2)
+        arcs_dict = {
+            "arcs": [
+                {"arc_id": "01", "beam_ids": all_beam_ids[:split]},
+                {"arc_id": "02", "beam_ids": all_beam_ids[split:]},
+            ]
+        }
     beam_ids = [beam_id for arc in arcs_dict["arcs"] for beam_id in arc["beam_ids"]]
     beams = pp.Beams(data, beam_ids=beam_ids, load_inf_matrix_full=flag_full_matrix)
     timing["beams_sec"] = _stage_end(
@@ -836,6 +852,7 @@ def run_compressrtp(
     adapter=None,
 ) -> Path:
     _ensure_compressrtp_on_path()
+    _ensure_mosek_license()
     import cvxpy as cp
     from compress_rtp.compress_rtp_optimization import CompressRTPOptimization
     from compress_rtp.utils.get_low_dim_basis import get_low_dim_basis

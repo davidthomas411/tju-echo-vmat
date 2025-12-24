@@ -29,6 +29,14 @@ except ImportError:
     from backend.adapters.example_adapter import ExampleAdapter
     from backend.adapters.huggingface_adapter import HuggingFaceAdapter
 
+try:
+    from agent_loop.loop import run_agent_session
+except ImportError:
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+    from agent_loop.loop import run_agent_session
+
 
 RUNS_DIR = Path(__file__).resolve().parent / "runs"
 RUNS_DIR_COMPRESS = Path(__file__).resolve().parent / "runs-compressrtp"
@@ -36,6 +44,8 @@ RUNS_DIR.mkdir(parents=True, exist_ok=True)
 RUNS_DIR_COMPRESS.mkdir(parents=True, exist_ok=True)
 BATCH_DIR = Path(__file__).resolve().parent / "runs-batches"
 BATCH_DIR.mkdir(parents=True, exist_ok=True)
+AGENT_DIR = Path(__file__).resolve().parent / "runs-agent"
+AGENT_DIR.mkdir(parents=True, exist_ok=True)
 WORKBENCH_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = WORKBENCH_DIR / "data"
 PROCESSED_DIR = DATA_DIR / "processed"
@@ -96,6 +106,23 @@ class BatchResponse(BaseModel):
     run_ids: list[str]
 
 
+class AgentRequest(BaseModel):
+    case_id: str
+    protocol: str = "Lung_2Gy_30Fx"
+    optimizer: Literal["echo-vmat"] = "echo-vmat"
+    beam_count: int = 3
+    preset: Literal["super_fast", "fast", "balanced"] = "super_fast"
+    sweep_param: str = "target-weight"
+    budget_runs: int = 20
+    budget_wall_sec: float | None = None
+    tag: Optional[str] = None
+    allowed_params: Optional[list[str]] = None
+
+
+class AgentResponse(BaseModel):
+    session_id: str
+
+
 app = FastAPI()
 access_logger = logging.getLogger("uvicorn.access")
 access_logger.disabled = True
@@ -110,6 +137,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _mark_stale_agent_sessions() -> None:
+    if not AGENT_DIR.exists():
+        return
+    for path in AGENT_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        status_path = path / "status.json"
+        if not status_path.exists():
+            continue
+        status = _read_json(status_path)
+        if status.get("state") in {"running", "queued"}:
+            status["state"] = "stopped"
+            status["error"] = "backend restarted"
+            status["ended_at"] = datetime.now().isoformat()
+            _write_json(status_path, status)
+
+
+@app.on_event("startup")
+def _startup_cleanup() -> None:
+    _mark_stale_agent_sessions()
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -146,6 +195,13 @@ def _safe_run_id(case_id: str, optimizer: str) -> str:
     return f"{optimizer}-{safe_case}-{ts}-{suffix}"
 
 
+def _safe_session_id(case_id: str) -> str:
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_case = re.sub(r"[^A-Za-z0-9_-]+", "_", case_id or "case").strip("_")
+    suffix = uuid4().hex[:6]
+    return f"agent-{safe_case}-{ts}-{suffix}"
+
+
 def _write_batch_status(batch_id: str, payload: dict) -> None:
     _write_json(_batch_path(batch_id), payload)
 
@@ -155,6 +211,36 @@ def _read_batch_status(batch_id: str) -> dict:
     if not path.exists():
         raise HTTPException(status_code=404, detail="batch not found")
     return _read_json(path)
+
+
+def _agent_path(session_id: str) -> Path:
+    return AGENT_DIR / session_id
+
+
+def _read_agent_status(session_id: str) -> dict:
+    path = _agent_path(session_id) / "status.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="agent session not found")
+    return _read_json(path)
+
+
+def _read_agent_log(session_id: str, limit: int = 200) -> list[dict]:
+    path = _agent_path(session_id) / "decision_log.jsonl"
+    if not path.exists():
+        return []
+    items: list[dict] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    if limit and len(items) > limit:
+        return items[-limit:]
+    return items
 
 
 def _find_run_dir(run_id: str) -> Path:
@@ -792,6 +878,39 @@ def _batch_worker(
     )
 
 
+def _agent_worker(session_id: str, config: dict[str, Any]) -> None:
+    session_dir = _agent_path(session_id)
+    try:
+        run_agent_session(session_dir, config)
+    except Exception as exc:
+        import traceback
+
+        traceback_path = session_dir / "traceback.txt"
+        traceback_path.write_text(traceback.format_exc(), encoding="utf-8")
+        _write_json(
+            session_dir / "status.json",
+            {
+                "session_id": session_id,
+                "state": "error",
+                "error": str(exc),
+                "traceback": str(traceback_path),
+            },
+        )
+
+
+@app.post("/agent/sessions/{session_id}/stop")
+def stop_agent_session(session_id: str) -> dict:
+    status_path = _agent_path(session_id) / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=404, detail="agent session not found")
+    status = _read_json(status_path)
+    status["state"] = "stopped"
+    status["error"] = "stopped by user"
+    status["ended_at"] = datetime.now().isoformat()
+    _write_json(status_path, status)
+    return {"session_id": session_id, "state": status["state"]}
+
+
 @app.post("/runs", response_model=RunResponse)
 def create_run(req: RunRequest) -> RunResponse:
     run_id = _safe_run_id(req.case_id, req.optimizer)
@@ -851,6 +970,62 @@ def create_batch(req: BatchRequest) -> BatchResponse:
 @app.get("/runs/batch/{batch_id}")
 def get_batch(batch_id: str) -> dict:
     return _read_batch_status(batch_id)
+
+
+@app.post("/agent/sessions", response_model=AgentResponse)
+def create_agent_session(req: AgentRequest) -> AgentResponse:
+    session_id = _safe_session_id(req.case_id)
+    session_dir = _agent_path(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    config = req.model_dump()
+    config.update(
+        {
+            "session_id": session_id,
+        }
+    )
+    _write_json(session_dir / "config.json", config)
+    _write_json(session_dir / "status.json", {"session_id": session_id, "state": "queued"})
+    thread = threading.Thread(target=_agent_worker, args=(session_id, config), daemon=True)
+    thread.start()
+    return AgentResponse(session_id=session_id)
+
+
+@app.get("/agent/sessions")
+def list_agent_sessions() -> dict:
+    sessions = []
+    if AGENT_DIR.exists():
+        for path in AGENT_DIR.iterdir():
+            if not path.is_dir():
+                continue
+            status_path = path / "status.json"
+            status = _read_json(status_path) if status_path.exists() else {"state": "unknown"}
+            config_path = path / "config.json"
+            config = _read_json(config_path) if config_path.exists() else {}
+            sessions.append(
+                {
+                    "session_id": path.name,
+                    "status": status,
+                    "case_id": config.get("case_id"),
+                    "protocol": config.get("protocol"),
+                    "timestamp": path.stat().st_mtime,
+                }
+            )
+    sessions.sort(key=lambda item: item.get("timestamp", 0), reverse=True)
+    return {"sessions": sessions}
+
+
+@app.get("/agent/sessions/{session_id}")
+def get_agent_session(session_id: str, log_limit: int = 200) -> dict:
+    status = _read_agent_status(session_id)
+    state_path = _agent_path(session_id) / "agent_state.json"
+    agent_state = _read_json(state_path) if state_path.exists() else status.get("agent_state")
+    decision_log = _read_agent_log(session_id, limit=log_limit)
+    return {
+        "session_id": session_id,
+        "status": status,
+        "agent_state": agent_state,
+        "decision_log": decision_log,
+    }
 
 
 @app.get("/runs")

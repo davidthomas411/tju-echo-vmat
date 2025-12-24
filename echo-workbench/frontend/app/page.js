@@ -77,6 +77,14 @@ const SWEEP_PRESETS = [
   },
 ];
 
+const AGENT_PARAMS = [
+  { id: "target-weight", label: "Target weight scale" },
+  { id: "oar-weight", label: "OAR weight scale" },
+  { id: "aperture-weight", label: "Aperture regularity scale" },
+  { id: "dfo-weight", label: "DFO weight scale" },
+  { id: "step-size", label: "Step size increment" },
+];
+
 const STAGES = [
   { id: "dataset_download", label: "Dataset" },
   { id: "case_load", label: "Case Load" },
@@ -465,6 +473,60 @@ function TracePlot({ points }) {
   );
 }
 
+function ScorePlot({ points, yLabel = "Percentile" }) {
+  if (!points.length) {
+    return <div className="placeholder">No agent runs yet.</div>;
+  }
+  const filtered = points.filter((point) => typeof point.y === "number");
+  if (!filtered.length) {
+    return <div className="placeholder">Agent results are missing plan scores.</div>;
+  }
+
+  const width = 520;
+  const height = 220;
+  const pad = { left: 48, right: 16, top: 18, bottom: 32 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+
+  const xs = filtered.map((p) => p.x);
+  const ys = filtered.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+
+  const path = filtered
+    .map((point, idx) => {
+      const x = pad.left + ((point.x - minX) / spanX) * plotW;
+      const y = pad.top + (1 - (point.y - minY) / spanY) * plotH;
+      return `${idx === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height="220">
+      <rect
+        x={pad.left}
+        y={pad.top}
+        width={plotW}
+        height={plotH}
+        fill="#0b1220"
+        stroke="rgba(148,163,184,0.25)"
+        rx="10"
+      />
+      <path d={path} fill="none" stroke="#7dd3fc" strokeWidth="2" />
+      <text x={pad.left} y={height - 8} fontSize="10" fill="#94a3b8">
+        Run index
+      </text>
+      <text x={8} y={pad.top + 12} fontSize="10" fill="#94a3b8">
+        {yLabel}
+      </text>
+    </svg>
+  );
+}
+
 function DvhPlot({ series, onHover }) {
   const [hoverX, setHoverX] = useState(null);
   const hoverSeries = useMemo(() => series.filter((entry) => !entry.dimmed), [series]);
@@ -736,6 +798,17 @@ export default function HomePage() {
   const [sweepPreset, setSweepPreset] = useState(SWEEP_PRESETS[0]?.id || "");
   const [sweepStatus, setSweepStatus] = useState("idle");
   const [sweepError, setSweepError] = useState(null);
+  const [agentMode, setAgentMode] = useState(false);
+  const [agentParam, setAgentParam] = useState(AGENT_PARAMS[0]?.id || "target-weight");
+  const [agentBudgetRuns, setAgentBudgetRuns] = useState(20);
+  const [agentBudgetWall, setAgentBudgetWall] = useState("");
+  const [agentSessionId, setAgentSessionId] = useState("");
+  const [agentStatus, setAgentStatus] = useState("idle");
+  const [agentError, setAgentError] = useState(null);
+  const [agentState, setAgentState] = useState(null);
+  const [agentDecisionLog, setAgentDecisionLog] = useState([]);
+  const [agentLogLines, setAgentLogLines] = useState([]);
+  const [agentLogError, setAgentLogError] = useState(null);
   const [availableRuns, setAvailableRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [runId, setRunId] = useState(null);
@@ -878,6 +951,93 @@ export default function HomePage() {
     }
   }
 
+  useEffect(() => {
+    if (!agentSessionId) {
+      return undefined;
+    }
+    let active = true;
+    let timer;
+
+    const poll = async () => {
+      try {
+        const response = await fetch(`${apiBase}/agent/sessions/${agentSessionId}`);
+        if (!response.ok) {
+          throw new Error(`Agent status error: ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!active) {
+          return;
+        }
+        const state = payload.status?.state || "unknown";
+        setAgentStatus(state);
+        setAgentState(payload.agent_state || null);
+        setAgentDecisionLog(payload.decision_log || []);
+        if (state === "running" || state === "queued") {
+          timer = setTimeout(poll, 5000);
+        }
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        setAgentError(err.message || "Failed to load agent session.");
+        setAgentStatus("error");
+      }
+    };
+
+    poll();
+    return () => {
+      active = false;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [agentSessionId, apiBase]);
+
+  useEffect(() => {
+    if (!latestAgentRunId) {
+      setAgentLogLines([]);
+      setAgentLogError(null);
+      return undefined;
+    }
+    let active = true;
+    let timer;
+
+    const pollLogs = async () => {
+      try {
+        const response = await fetch(`${apiBase}/runs/${latestAgentRunId}/artifacts/logs.txt`);
+        if (!response.ok) {
+          throw new Error(`Agent log fetch failed: ${response.status}`);
+        }
+        const text = await response.text();
+        if (!active) {
+          return;
+        }
+        const lines = text
+          .split(/\r?\n/)
+          .map((line) => line.trimEnd())
+          .filter((line) => line.length > 0);
+        setAgentLogLines(lines.slice(-200));
+        setAgentLogError(null);
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        setAgentLogError(err.message || "Failed to load agent logs.");
+      }
+      if (active && (latestAgentRunState === "running" || latestAgentRunState === "queued")) {
+        timer = setTimeout(pollLogs, 2000);
+      }
+    };
+
+    pollLogs();
+    return () => {
+      active = false;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [apiBase, latestAgentRunId, latestAgentRunState]);
+
   const filteredCaseOptions = useMemo(() => {
     const query = caseFilter.trim().toLowerCase();
     let filtered = caseOptions;
@@ -979,6 +1139,48 @@ export default function HomePage() {
       })
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [caseRuns]);
+
+  const agentRuns = useMemo(() => agentState?.runs || [], [agentState]);
+
+  const agentScoreSeries = useMemo(() => {
+    return agentRuns
+      .map((run, idx) => ({
+        x: Number.isFinite(run.run_index) ? run.run_index : idx,
+        y: Number.isFinite(run.plan_percentile) ? run.plan_percentile : null,
+      }))
+      .filter((entry) => entry.y !== null)
+      .sort((a, b) => a.x - b.x);
+  }, [agentRuns]);
+
+  const agentRunsTable = useMemo(() => {
+    return [...agentRuns].sort((a, b) => {
+      const left = Number.isFinite(a.run_index) ? a.run_index : 0;
+      const right = Number.isFinite(b.run_index) ? b.run_index : 0;
+      return left - right;
+    });
+  }, [agentRuns]);
+
+  const agentTaggedRuns = useMemo(() => {
+    if (!agentSessionId) {
+      return [];
+    }
+    return availableRuns.filter((run) => run.tag && run.tag.includes(`agent:${agentSessionId}`));
+  }, [availableRuns, agentSessionId]);
+
+  const latestAgentRun = useMemo(() => {
+    if (!agentTaggedRuns.length) {
+      return null;
+    }
+    const sorted = [...agentTaggedRuns].sort((a, b) => {
+      const left = Number.isFinite(a.timestamp) ? a.timestamp : 0;
+      const right = Number.isFinite(b.timestamp) ? b.timestamp : 0;
+      return right - left;
+    });
+    return sorted[0];
+  }, [agentTaggedRuns]);
+
+  const latestAgentRunId = latestAgentRun?.run_id || "";
+  const latestAgentRunState = latestAgentRun?.status?.state || "unknown";
 
   const displayPlanScore = planScoreView === "reference" ? referenceScore : planScore;
   const displayPlanScoreStatus = planScoreView === "reference" ? referenceScoreStatus : planScoreStatus;
@@ -1109,6 +1311,75 @@ export default function HomePage() {
       setSweepError(err.message || "Failed to start parameter sweep.");
     } finally {
       setSweepStatus("idle");
+    }
+  }
+
+  async function startAgent() {
+    if (!caseId) {
+      setAgentError("Select a patient to run Agent Mode.");
+      return;
+    }
+    if (optimizer !== "echo-vmat") {
+      setAgentError("Agent Mode is available for ECHO-VMAT only.");
+      return;
+    }
+    const runs = Number.parseInt(agentBudgetRuns, 10);
+    if (!Number.isFinite(runs) || runs <= 0) {
+      setAgentError("Budget runs must be a positive number.");
+      return;
+    }
+    setAgentStatus("starting");
+    setAgentError(null);
+    try {
+      const payload = {
+        case_id: caseId,
+        protocol,
+        optimizer: "echo-vmat",
+        preset,
+        beam_count: BEAM_LIMIT,
+        sweep_param: agentParam,
+        budget_runs: runs,
+        budget_wall_sec: agentBudgetWall ? Number.parseFloat(agentBudgetWall) : null,
+        tag: tag.trim() || null,
+        allowed_params: AGENT_PARAMS.map((param) => param.id),
+      };
+      const response = await fetch(`${apiBase}/agent/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(`Backend error: ${response.status}`);
+      }
+      const data = await response.json();
+      setAgentSessionId(data.session_id);
+      setAgentStatus("queued");
+      refreshRuns();
+    } catch (err) {
+      setAgentError(err.message || "Failed to start agent session.");
+      setAgentStatus("idle");
+    }
+  }
+
+  async function stopAgent() {
+    if (!agentSessionId) {
+      setAgentError("No active agent session to stop.");
+      return;
+    }
+    setAgentStatus("stopping");
+    setAgentError(null);
+    try {
+      const response = await fetch(`${apiBase}/agent/sessions/${agentSessionId}/stop`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Backend error: ${response.status}`);
+      }
+      const data = await response.json();
+      setAgentStatus(data.state || "stopped");
+    } catch (err) {
+      setAgentError(err.message || "Failed to stop agent session.");
+      setAgentStatus("error");
     }
   }
 
@@ -1572,6 +1843,47 @@ export default function HomePage() {
       setPlanScoreView("reference");
     }
   }, [runId]);
+
+  useEffect(() => {
+    setAgentSessionId("");
+    setAgentState(null);
+    setAgentDecisionLog([]);
+    setAgentStatus("idle");
+    setAgentError(null);
+  }, [caseId, protocol]);
+
+  useEffect(() => {
+    if (!caseId) {
+      return;
+    }
+    if (agentSessionId && (agentStatus === "running" || agentStatus === "queued")) {
+      return;
+    }
+    let active = true;
+    fetch(`${apiBase}/agent/sessions`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (!active || !payload) {
+          return;
+        }
+        const sessions = payload.sessions || [];
+        const filtered = sessions.filter(
+          (session) =>
+            (session.case_id || "").toLowerCase() === caseId.toLowerCase() &&
+            (!protocol || session.protocol === protocol)
+        );
+        if (!filtered.length) {
+          setAgentSessionId("");
+          return;
+        }
+        filtered.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        setAgentSessionId(filtered[0].session_id);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [apiBase, caseId, protocol, agentSessionId, agentStatus]);
 
   useEffect(() => {
     if (!caseId) {
@@ -2342,34 +2654,100 @@ export default function HomePage() {
               <div className="placeholder">Sweeps are available for ECHO-VMAT only.</div>
             ) : (
               <div style={{ display: "grid", gap: "10px" }}>
-                <label htmlFor="sweep-preset">Sweep preset</label>
-                <select
-                  id="sweep-preset"
-                  value={sweepPreset}
-                  onChange={(event) => setSweepPreset(event.target.value)}
-                >
-                  {SWEEP_PRESETS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                {activeSweep ? (
+                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                  <button
+                    className={`btn btn-ghost ${agentMode ? "active" : ""}`}
+                    onClick={() => setAgentMode((prev) => !prev)}
+                  >
+                    Agent Mode
+                  </button>
+                  <span style={{ color: "#94a3b8", fontSize: "12px" }}>
+                    Closed-loop tuning with a fixed run budget.
+                  </span>
+                </div>
+                {agentMode ? (
                   <>
-                    <div style={{ color: "#94a3b8", fontSize: "12px" }}>{activeSweep.description}</div>
-                    <div style={{ color: "#94a3b8", fontSize: "12px" }}>
-                      Values: {activeSweep.values.join(", ")}
+                    <label htmlFor="agent-param">Agent sweep parameter</label>
+                    <select
+                      id="agent-param"
+                      value={agentParam}
+                      onChange={(event) => setAgentParam(event.target.value)}
+                    >
+                      {AGENT_PARAMS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <label htmlFor="agent-budget-runs">Budget (max runs)</label>
+                    <input
+                      id="agent-budget-runs"
+                      type="number"
+                      min="1"
+                      value={agentBudgetRuns}
+                      onChange={(event) => setAgentBudgetRuns(event.target.value)}
+                    />
+                    <label htmlFor="agent-budget-wall">Wall clock budget (sec, optional)</label>
+                    <input
+                      id="agent-budget-wall"
+                      type="number"
+                      min="0"
+                      placeholder="e.g. 1800"
+                      value={agentBudgetWall}
+                      onChange={(event) => setAgentBudgetWall(event.target.value)}
+                    />
+                    {agentError ? <div className="placeholder">{agentError}</div> : null}
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <button
+                        className="btn"
+                        onClick={startAgent}
+                        disabled={!caseId || agentStatus === "running" || agentStatus === "queued"}
+                      >
+                        {agentStatus === "running" || agentStatus === "queued"
+                          ? "Agent running..."
+                          : "Run Agent"}
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        onClick={stopAgent}
+                        disabled={!agentSessionId || (agentStatus !== "running" && agentStatus !== "queued")}
+                      >
+                        Stop Agent
+                      </button>
                     </div>
                   </>
-                ) : null}
-                {sweepError ? <div className="placeholder">{sweepError}</div> : null}
-                <button
-                  className="btn"
-                  onClick={startSweep}
-                  disabled={!caseId || sweepStatus === "running"}
-                >
-                  {sweepStatus === "running" ? "Starting sweep..." : "Start Sweep"}
-                </button>
+                ) : (
+                  <>
+                    <label htmlFor="sweep-preset">Sweep preset</label>
+                    <select
+                      id="sweep-preset"
+                      value={sweepPreset}
+                      onChange={(event) => setSweepPreset(event.target.value)}
+                    >
+                      {SWEEP_PRESETS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    {activeSweep ? (
+                      <>
+                        <div style={{ color: "#94a3b8", fontSize: "12px" }}>{activeSweep.description}</div>
+                        <div style={{ color: "#94a3b8", fontSize: "12px" }}>
+                          Values: {activeSweep.values.join(", ")}
+                        </div>
+                      </>
+                    ) : null}
+                    {sweepError ? <div className="placeholder">{sweepError}</div> : null}
+                    <button
+                      className="btn"
+                      onClick={startSweep}
+                      disabled={!caseId || sweepStatus === "running"}
+                    >
+                      {sweepStatus === "running" ? "Starting sweep..." : "Start Sweep"}
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -2889,6 +3267,160 @@ export default function HomePage() {
 
         {activeTab === "sweeps" ? (
           <section className="panel">
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">Agent Mode Summary</div>
+                  <div className="card-subtitle">Closed-loop tuning runs for the selected patient</div>
+                </div>
+              </div>
+              {!agentSessionId ? (
+                <div className="placeholder">Start an Agent Mode session from the Workbench tab.</div>
+              ) : agentStatus === "error" ? (
+                <div className="placeholder">{agentError || "Agent session failed."}</div>
+              ) : (
+                <div style={{ display: "grid", gap: "16px" }}>
+                  <div className="stat-grid">
+                    <div className="stat">
+                      <span>Session</span>
+                      <strong>{agentSessionId}</strong>
+                    </div>
+                    <div className="stat">
+                      <span>Status</span>
+                      <strong>{agentStatus}</strong>
+                    </div>
+                    <div className="stat">
+                      <span>Best Score</span>
+                      <strong>
+                        {Number.isFinite(agentState?.best_plan_score)
+                          ? agentState.best_plan_score.toFixed(2)
+                          : "--"}
+                      </strong>
+                    </div>
+                    <div className="stat">
+                      <span>Best Percentile</span>
+                      <strong>
+                        {agentState?.best_plan_percentile !== null &&
+                        agentState?.best_plan_percentile !== undefined
+                          ? formatPercent(agentState.best_plan_percentile)
+                          : "--"}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="card-subtitle">Score percentile vs run index</div>
+                    <ScorePlot points={agentScoreSeries} />
+                  </div>
+
+                  <div className="table-wrap">
+                    <table className="metrics-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Parameter</th>
+                          <th>Value</th>
+                          <th>Score</th>
+                          <th>Percentile</th>
+                          <th>Run</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {agentRunsTable.length ? (
+                          agentRunsTable.map((run) => (
+                            <tr key={run.run_id}>
+                              <td>{Number.isFinite(run.run_index) ? run.run_index : "--"}</td>
+                              <td>{run.sweep_param || "--"}</td>
+                              <td>{run.sweep_value !== null && run.sweep_value !== undefined ? run.sweep_value : "--"}</td>
+                              <td>{Number.isFinite(run.plan_score) ? run.plan_score.toFixed(1) : "--"}</td>
+                              <td>{run.plan_percentile !== null ? formatPercent(run.plan_percentile) : "--"}</td>
+                              <td>
+                                <button className="btn btn-ghost" onClick={() => loadRun(run.run_id)}>
+                                  {run.run_id}
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={6} className="placeholder">
+                              No agent runs recorded yet.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="table-wrap">
+                    <table className="metrics-table">
+                      <thead>
+                        <tr>
+                          <th>Decision</th>
+                          <th>Param</th>
+                          <th>Values</th>
+                          <th>Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {agentDecisionLog.length ? (
+                          agentDecisionLog.map((entry, idx) => (
+                            <tr key={`${entry.ts || idx}`}>
+                              <td>{entry.decision?.action || "--"}</td>
+                              <td>{entry.decision?.param || "--"}</td>
+                              <td>
+                                {Array.isArray(entry.decision?.values)
+                                  ? entry.decision.values.join(", ")
+                                  : "--"}
+                              </td>
+                              <td>{entry.decision?.reason || "--"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={4} className="placeholder">
+                              No decisions logged yet.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="card">
+                    <div className="card-header">
+                      <div>
+                        <div className="card-title">Agent Live Console</div>
+                        <div className="card-subtitle">Latest run logs for this agent session</div>
+                      </div>
+                    </div>
+                    {!latestAgentRunId ? (
+                      <div className="placeholder">Waiting for the first agent run to start.</div>
+                    ) : (
+                      <>
+                        <div className="card-subtitle" style={{ marginBottom: "10px" }}>
+                          Run: {latestAgentRunId} ({latestAgentRunState})
+                        </div>
+                        <div className="console">
+                          {agentLogError ? (
+                            <div className="placeholder">{agentLogError}</div>
+                          ) : agentLogLines.length ? (
+                            agentLogLines.map((line, idx) => (
+                              <div key={`${latestAgentRunId}-log-${idx}`} className="console-line">
+                                {line}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="placeholder">Waiting for log output.</div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="card">
               <div className="card-header">
                 <div>
