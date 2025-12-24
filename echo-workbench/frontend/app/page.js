@@ -993,51 +993,6 @@ export default function HomePage() {
     };
   }, [agentSessionId, apiBase]);
 
-  useEffect(() => {
-    if (!latestAgentRunId) {
-      setAgentLogLines([]);
-      setAgentLogError(null);
-      return undefined;
-    }
-    let active = true;
-    let timer;
-
-    const pollLogs = async () => {
-      try {
-        const response = await fetch(`${apiBase}/runs/${latestAgentRunId}/artifacts/logs.txt`);
-        if (!response.ok) {
-          throw new Error(`Agent log fetch failed: ${response.status}`);
-        }
-        const text = await response.text();
-        if (!active) {
-          return;
-        }
-        const lines = text
-          .split(/\r?\n/)
-          .map((line) => line.trimEnd())
-          .filter((line) => line.length > 0);
-        setAgentLogLines(lines.slice(-200));
-        setAgentLogError(null);
-      } catch (err) {
-        if (!active) {
-          return;
-        }
-        setAgentLogError(err.message || "Failed to load agent logs.");
-      }
-      if (active && (latestAgentRunState === "running" || latestAgentRunState === "queued")) {
-        timer = setTimeout(pollLogs, 2000);
-      }
-    };
-
-    pollLogs();
-    return () => {
-      active = false;
-      if (timer) {
-        clearTimeout(timer);
-      }
-    };
-  }, [apiBase, latestAgentRunId, latestAgentRunState]);
-
   const filteredCaseOptions = useMemo(() => {
     const query = caseFilter.trim().toLowerCase();
     let filtered = caseOptions;
@@ -1181,6 +1136,51 @@ export default function HomePage() {
 
   const latestAgentRunId = latestAgentRun?.run_id || "";
   const latestAgentRunState = latestAgentRun?.status?.state || "unknown";
+
+  useEffect(() => {
+    if (!latestAgentRunId) {
+      setAgentLogLines([]);
+      setAgentLogError(null);
+      return undefined;
+    }
+    let active = true;
+    let timer;
+
+    const pollLogs = async () => {
+      try {
+        const response = await fetch(`${apiBase}/runs/${latestAgentRunId}/artifacts/logs.txt`);
+        if (!response.ok) {
+          throw new Error(`Agent log fetch failed: ${response.status}`);
+        }
+        const text = await response.text();
+        if (!active) {
+          return;
+        }
+        const lines = text
+          .split(/\r?\n/)
+          .map((line) => line.trimEnd())
+          .filter((line) => line.length > 0);
+        setAgentLogLines(lines.slice(-200));
+        setAgentLogError(null);
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        setAgentLogError(err.message || "Failed to load agent logs.");
+      }
+      if (active && (latestAgentRunState === "running" || latestAgentRunState === "queued")) {
+        timer = setTimeout(pollLogs, 2000);
+      }
+    };
+
+    pollLogs();
+    return () => {
+      active = false;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [apiBase, latestAgentRunId, latestAgentRunState]);
 
   const displayPlanScore = planScoreView === "reference" ? referenceScore : planScore;
   const displayPlanScoreStatus = planScoreView === "reference" ? referenceScoreStatus : planScoreStatus;
