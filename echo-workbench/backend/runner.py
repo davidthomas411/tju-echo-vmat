@@ -120,6 +120,116 @@ def _emit_trace(out_dir: Path, sol_convergence: list[dict], step_label: str) -> 
         _log_event(out_dir, "trace", "trace_point", data=data)
 
 
+def _scale_weight(weight: object, scale: float) -> object:
+    if weight is None or scale == 1.0:
+        return weight
+    if isinstance(weight, list):
+        return [float(val) * scale for val in weight]
+    try:
+        return float(weight) * scale
+    except (TypeError, ValueError):
+        return weight
+
+
+def _apply_objective_weight_scale(objectives: list[dict], scale_map: dict) -> None:
+    if not objectives or not scale_map:
+        return
+    target_scale = float(scale_map.get("target", 1.0))
+    oar_scale = float(scale_map.get("oar", 1.0))
+    aperture_scale = float(scale_map.get("aperture", 1.0))
+    dfo_scale = float(scale_map.get("dfo", 1.0))
+    for obj in objectives:
+        weight = obj.get("weight")
+        if weight is None:
+            continue
+        obj_type = str(obj.get("type", "")).lower()
+        if obj_type.startswith("aperture_"):
+            scale = aperture_scale
+        elif obj_type == "dfo":
+            scale = dfo_scale
+        elif obj.get("is_target", 0):
+            scale = target_scale
+        else:
+            scale = oar_scale
+        if scale != 1.0:
+            obj["weight"] = _scale_weight(weight, scale)
+
+
+def _objective_matches(obj: dict, override: dict) -> bool:
+    obj_type = str(obj.get("type", "")).lower()
+    if "type" in override and str(override.get("type", "")).lower() != obj_type:
+        return False
+    if "structure_name" in override:
+        if str(override.get("structure_name", "")).upper() != str(obj.get("structure_name", "")).upper():
+            return False
+    if "structure_def" in override:
+        if str(override.get("structure_def", "")).upper() != str(obj.get("structure_def", "")).upper():
+            return False
+    return True
+
+
+def _apply_explicit_objective_weights(objectives: list[dict], overrides: list[dict]) -> None:
+    if not objectives or not overrides:
+        return
+    for override in overrides:
+        if "weight" not in override:
+            continue
+        for obj in objectives:
+            if _objective_matches(obj, override):
+                obj["weight"] = override["weight"]
+
+
+def _filter_step_overrides(overrides: list[dict], step_id: str | None) -> list[dict]:
+    if not overrides:
+        return []
+    filtered: list[dict] = []
+    for override in overrides:
+        step = override.get("step")
+        if step is None:
+            filtered.append(override)
+        elif step_id is not None and str(step) == str(step_id):
+            filtered.append(override)
+    return filtered
+
+
+def _apply_opt_params_overrides(opt_params: dict, overrides: dict | None) -> dict:
+    if not overrides or not isinstance(overrides, dict):
+        return opt_params
+    updated = deepcopy(opt_params)
+    opt_overrides = overrides.get("opt_parameters")
+    if isinstance(opt_overrides, dict):
+        updated.setdefault("opt_parameters", {}).update(opt_overrides)
+    scale_map = overrides.get("objective_weight_scale")
+    weight_overrides = overrides.get("objective_weights")
+    if "steps" in updated:
+        for step_id, step_cfg in updated.get("steps", {}).items():
+            objectives = step_cfg.get("objective_functions", [])
+            if isinstance(scale_map, dict):
+                _apply_objective_weight_scale(objectives, scale_map)
+            if isinstance(weight_overrides, list):
+                _apply_explicit_objective_weights(
+                    objectives, _filter_step_overrides(weight_overrides, str(step_id))
+                )
+    else:
+        objectives = updated.get("objective_functions", [])
+        if isinstance(scale_map, dict):
+            _apply_objective_weight_scale(objectives, scale_map)
+        if isinstance(weight_overrides, list):
+            _apply_explicit_objective_weights(objectives, _filter_step_overrides(weight_overrides, None))
+    return updated
+
+
+def _parse_opt_params_overrides(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        path = Path(raw[1:])
+        if not path.exists():
+            raise FileNotFoundError(f"Overrides file not found: {path}")
+        return _read_json(path)
+    return json.loads(raw)
+
+
 def _update_status(out_dir: Path, payload: dict) -> None:
     _write_json(out_dir / "status.json", payload)
 
@@ -233,6 +343,7 @@ def run_echo_example(
     use_available_beams: bool = False,
     force_sparse: bool = False,
     super_fast: bool = False,
+    opt_params_overrides: dict | None = None,
     tag: str | None = None,
     adapter=None,
 ) -> Path:
@@ -273,6 +384,8 @@ def run_echo_example(
     }
     if tag:
         run_config["tag"] = tag
+    if opt_params_overrides:
+        run_config["opt_params_overrides"] = opt_params_overrides
     _write_json(out_dir / "config.json", run_config)
     started_at = _now_iso()
     _update_status(
@@ -356,6 +469,13 @@ def run_echo_example(
 
     if force_sparse or super_fast:
         vmat_opt_params.setdefault("opt_parameters", {})["flag_full_matrix"] = 0
+
+    if opt_params_overrides:
+        vmat_opt_params = _apply_opt_params_overrides(vmat_opt_params, opt_params_overrides)
+        _log_event(out_dir, "opt_params", "Applied optimization param overrides", data=opt_params_overrides)
+
+    if force_sparse or super_fast:
+        vmat_opt_params.setdefault("opt_parameters", {})["flag_full_matrix"] = 0
     flag_full_matrix = vmat_opt_params.get("opt_parameters", {}).get("flag_full_matrix", False)
     run_config.update(
         {
@@ -364,6 +484,8 @@ def run_echo_example(
             "force_sparse": force_sparse,
             "super_fast": super_fast,
             "flag_full_matrix": bool(flag_full_matrix),
+            "opt_params_file": str(opt_params_path),
+            "clinical_criteria_file": str(criteria_path),
         }
     )
     _write_json(out_dir / "config.json", run_config)
@@ -701,6 +823,7 @@ def run_compressrtp(
     fast: bool = False,
     super_fast: bool = False,
     use_gpu: bool = False,
+    opt_params_overrides: dict | None = None,
     tag: str | None = None,
     adapter=None,
 ) -> Path:
@@ -755,6 +878,8 @@ def run_compressrtp(
     }
     if tag:
         run_config["tag"] = tag
+    if opt_params_overrides:
+        run_config["opt_params_overrides"] = opt_params_overrides
     if beam_ids_override:
         run_config["beam_ids_override"] = beam_ids_override
     _write_json(out_dir / "config.json", run_config)
@@ -847,6 +972,9 @@ def run_compressrtp(
     structs = pp.Structures(data)
     clinical_criteria = pp.ClinicalCriteria(data, protocol_name=protocol_name)
     opt_params = data.load_config_opt_params(protocol_name=protocol_name)
+    if opt_params_overrides:
+        opt_params = _apply_opt_params_overrides(opt_params, opt_params_overrides)
+        _log_event(out_dir, "opt_params", "Applied optimization param overrides", data=opt_params_overrides)
     structs.create_opt_structures(opt_params=opt_params, clinical_criteria=clinical_criteria)
     timing["case_load_sec"] = time.perf_counter() - t_case_start
     timing["case_load_rss_mb"] = _rss_mb()
@@ -1255,6 +1383,11 @@ def main() -> None:
     )
     parser.add_argument("--tag", default=None, help="Optional run tag for labeling.")
     parser.add_argument(
+        "--opt-params-overrides",
+        default=None,
+        help="JSON string or @path for optimization parameter overrides.",
+    )
+    parser.add_argument(
         "--beam-ids",
         default=None,
         help="Comma-separated beam IDs override (e.g. 0,1,2).",
@@ -1316,6 +1449,7 @@ def main() -> None:
             token=args.hf_token,
             subdir=args.hf_subdir,
         )
+    opt_params_overrides = _parse_opt_params_overrides(args.opt_params_overrides)
     run_echo_example(
         case_id=args.case_id,
         protocol_name=args.protocol,
@@ -1326,6 +1460,7 @@ def main() -> None:
         use_available_beams=use_available_beams,
         force_sparse=force_sparse,
         super_fast=super_fast,
+        opt_params_overrides=opt_params_overrides,
         tag=args.tag,
         adapter=adapter,
     ) if args.optimizer == "echo-vmat" else run_compressrtp(
@@ -1344,6 +1479,7 @@ def main() -> None:
         fast=args.fast,
         super_fast=super_fast,
         use_gpu=args.gpu,
+        opt_params_overrides=opt_params_overrides,
         tag=args.tag,
         adapter=adapter,
     )

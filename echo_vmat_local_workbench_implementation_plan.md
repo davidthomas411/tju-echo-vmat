@@ -87,7 +87,7 @@ This is a **research / pre‑clinical workbench**, not a clinical system.
 - [x] Populate patient list from population metadata (`/patients`)
 - [x] Add population score API (`/plan-score/population`) and UI tab with histogram + stats
 - [x] Add patient plan score table (reference scores + latest run score)
-- [ ] Add parameter sweep workflow + documentation for adjustable optimization parameters
+- [x] Add parameter sweep workflow + documentation for adjustable optimization parameters
 
 ---
 

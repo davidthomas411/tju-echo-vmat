@@ -7,7 +7,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 import h5py
@@ -78,6 +78,7 @@ class RunRequest(BaseModel):
     beam_ids: Optional[list[int]] = None
     use_gpu: bool = False
     tag: Optional[str] = None
+    opt_params_overrides: Optional[dict[str, Any]] = None
 
 
 class RunResponse(BaseModel):
@@ -733,6 +734,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 fast=req.fast,
                 super_fast=req.super_fast,
                 use_gpu=req.use_gpu,
+                opt_params_overrides=req.opt_params_overrides,
                 tag=req.tag,
                 adapter=adapter,
             )
@@ -746,6 +748,7 @@ def _run_worker(run_id: str, req: RunRequest, out_dir: Path) -> None:
                 use_available_beams=use_available_beams,
                 force_sparse=force_sparse,
                 super_fast=req.super_fast,
+                opt_params_overrides=req.opt_params_overrides,
                 tag=req.tag,
                 adapter=adapter,
             )

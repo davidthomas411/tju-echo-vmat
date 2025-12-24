@@ -118,6 +118,31 @@ UI notes:
 - Add a run tag to label experiments and comparisons.
 - The "Safe (low memory)" preset uses planner beams + sparse matrix to reduce RAM.
 - Batch runs (sequential queue): POST `/runs/batch` and poll `/runs/batch/{batch_id}`.
+- Use the Parameter Sweep card to launch a batch of runs with opt-parameter overrides.
+
+Parameter sweeps (ECHO-VMAT):
+- Source config file: `echo-workbench/echo-vmat/echo_vmat/config_files/<protocol>_opt_params.json`
+- Supported overrides:
+  - `opt_parameters`: direct key overrides (e.g., `step_size_increment`, `termination_gap`, `inf_matrix_scale_factor`)
+  - `objective_weight_scale`: scales `{ target, oar, aperture, dfo }`
+  - `objective_weights`: explicit overrides `{ step, type, structure_name, weight }`
+- CLI example:
+```
+python echo-workbench/backend/runner.py \
+  --case-id Lung_Patient_11 \
+  --protocol Lung_2Gy_30Fx \
+  --opt-params-overrides @/path/to/overrides.json
+```
+- API example (batch sweep):
+```
+curl -X POST http://127.0.0.1:8000/runs/batch \
+  -H "Content-Type: application/json" \
+  -d '{"label":"sweep-target","runs":[
+        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","opt_params_overrides":{"objective_weight_scale":{"target":0.8}},"tag":"target=0.8"},
+        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","opt_params_overrides":{"objective_weight_scale":{"target":1.0}},"tag":"target=1.0"},
+        {"case_id":"Lung_Patient_11","protocol":"Lung_2Gy_30Fx","optimizer":"echo-vmat","opt_params_overrides":{"objective_weight_scale":{"target":1.2}},"tag":"target=1.2"}
+      ]}'
+```
 
 CompressRTP notes:
 - Select Optimizer = CompressRTP and choose a compression mode.

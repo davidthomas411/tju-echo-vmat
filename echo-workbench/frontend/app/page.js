@@ -27,6 +27,54 @@ const COMPRESS_STEPS = [
   { id: "wavelet", label: "Wavelet Basis" },
 ];
 
+const SWEEP_PRESETS = [
+  {
+    id: "target-weight",
+    label: "Target weight scale",
+    description: "Scale PTV/CTV/GTV quadratic weights across steps.",
+    values: [0.8, 1.0, 1.2],
+    buildOverrides: (value) => ({
+      objective_weight_scale: { target: value },
+    }),
+  },
+  {
+    id: "oar-weight",
+    label: "OAR weight scale",
+    description: "Scale OAR quadratic weights (CORD/ESOPHAGUS/HEART/LUNGS).",
+    values: [0.8, 1.0, 1.2],
+    buildOverrides: (value) => ({
+      objective_weight_scale: { oar: value },
+    }),
+  },
+  {
+    id: "aperture-weight",
+    label: "Aperture regularity scale",
+    description: "Scale aperture regularity/similarity penalties.",
+    values: [0.5, 1.0, 2.0],
+    buildOverrides: (value) => ({
+      objective_weight_scale: { aperture: value },
+    }),
+  },
+  {
+    id: "dfo-weight",
+    label: "DFO weight scale",
+    description: "Scale DFO objective weights.",
+    values: [0.8, 1.0, 1.2],
+    buildOverrides: (value) => ({
+      objective_weight_scale: { dfo: value },
+    }),
+  },
+  {
+    id: "step-size",
+    label: "Step size increment",
+    description: "Adjust correction loop step size increment.",
+    values: [1, 2, 3],
+    buildOverrides: (value) => ({
+      opt_parameters: { step_size_increment: value },
+    }),
+  },
+];
+
 const STAGES = [
   { id: "dataset_download", label: "Dataset" },
   { id: "case_load", label: "Case Load" },
@@ -657,6 +705,9 @@ export default function HomePage() {
   const [beamCount, setBeamCount] = useState("");
   const [useGpu, setUseGpu] = useState(false);
   const [tag, setTag] = useState("");
+  const [sweepPreset, setSweepPreset] = useState(SWEEP_PRESETS[0]?.id || "");
+  const [sweepStatus, setSweepStatus] = useState("idle");
+  const [sweepError, setSweepError] = useState(null);
   const [availableRuns, setAvailableRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState("");
   const [runId, setRunId] = useState(null);
@@ -710,6 +761,10 @@ export default function HomePage() {
   const [error, setError] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const resultsLoaded = useRef(false);
+  const activeSweep = useMemo(
+    () => SWEEP_PRESETS.find((preset) => preset.id === sweepPreset),
+    [sweepPreset]
+  );
   const wheelThrottle = useRef(0);
 
   const apiBase = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
@@ -790,9 +845,6 @@ export default function HomePage() {
       const payload = await response.json();
       const runs = payload.runs || [];
       setAvailableRuns(runs);
-      if (!selectedRunId && runs.length) {
-        setSelectedRunId(runs[0].run_id);
-      }
     } catch (err) {
       setAvailableRuns([]);
     }
@@ -834,23 +886,30 @@ export default function HomePage() {
     return map;
   }, [availableRuns]);
 
+  const caseRuns = useMemo(() => {
+    if (!caseId) {
+      return [];
+    }
+    return availableRuns.filter((run) => {
+      const caseValue = (run.case_id || run.status?.case_id || "").toLowerCase();
+      return caseValue === caseId.toLowerCase();
+    });
+  }, [availableRuns, caseId]);
+
   const filteredRuns = useMemo(() => {
+    if (caseId) {
+      return caseRuns;
+    }
     const query = caseFilter.trim().toLowerCase();
     if (!query) {
-      if (!caseId) {
-        return availableRuns;
-      }
-      return availableRuns.filter((run) => {
-        const caseValue = (run.case_id || run.status?.case_id || "").toLowerCase();
-        return caseValue === caseId.toLowerCase();
-      });
+      return availableRuns;
     }
     return availableRuns.filter((run) => {
       const caseValue = (run.case_id || run.status?.case_id || "").toLowerCase();
       const runIdValue = String(run.run_id || "").toLowerCase();
       return caseValue.includes(query) || runIdValue.includes(query);
     });
-  }, [availableRuns, caseFilter]);
+  }, [availableRuns, caseFilter, caseId, caseRuns]);
 
   const displayPlanScore = planScoreView === "reference" ? referenceScore : planScore;
   const displayPlanScoreStatus = planScoreView === "reference" ? referenceScoreStatus : planScoreStatus;
@@ -932,10 +991,62 @@ export default function HomePage() {
     }
   }
 
-  function loadRun(runValue) {
-    if (!runValue) {
+  async function startSweep() {
+    if (!caseId) {
+      setSweepError("Select a patient to run a sweep.");
       return;
     }
+    if (optimizer !== "echo-vmat") {
+      setSweepError("Parameter sweeps are available for ECHO-VMAT only.");
+      return;
+    }
+    if (!activeSweep) {
+      setSweepError("Select a sweep preset.");
+      return;
+    }
+    setSweepStatus("running");
+    setSweepError(null);
+    try {
+      const basePayload = {
+        case_id: caseId,
+        protocol,
+        adapter: "example",
+        fast: preset === "fast",
+        super_fast: preset === "super_fast",
+        optimizer: "echo-vmat",
+      };
+      const runs = activeSweep.values.map((value) => {
+        const overrides = activeSweep.buildOverrides(value);
+        const tagLabel = tag.trim()
+          ? `${tag.trim()} | ${activeSweep.label}=${value}`
+          : `${activeSweep.label}=${value}`;
+        return {
+          ...basePayload,
+          opt_params_overrides: overrides,
+          tag: tagLabel,
+        };
+      });
+      const response = await fetch(`${apiBase}/runs/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: `sweep:${activeSweep.id}`,
+          runs,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Backend error: ${response.status}`);
+      }
+      await response.json();
+      refreshRuns();
+    } catch (err) {
+      setSweepError(err.message || "Failed to start parameter sweep.");
+    } finally {
+      setSweepStatus("idle");
+    }
+  }
+
+  function resetRunState() {
     setError(null);
     setEvents([]);
     setTiming(null);
@@ -947,6 +1058,7 @@ export default function HomePage() {
     setDvhHover(null);
     setPlanScore(null);
     setPlanScoreStatus("idle");
+    setPlanScoreView("reference");
     setCtMeta(null);
     setCtSliceIndex(0);
     setStructures([]);
@@ -966,29 +1078,17 @@ export default function HomePage() {
     setRtStructStatus("idle");
     setRtStructPath("");
     resultsLoaded.current = false;
-    setRunId(runValue);
-    setIsRunning(false);
   }
 
-  async function fetchCtMeta(runValue) {
+  function loadRun(runValue) {
     if (!runValue) {
-      setCtMeta(null);
       return;
     }
-    try {
-      const response = await fetch(`${apiBase}/runs/${runValue}/ct/meta`);
-      if (!response.ok) {
-        setCtMeta(null);
-        return;
-      }
-      const payload = await response.json();
-      setCtMeta(payload);
-      if (payload.slice_count) {
-        setCtSliceIndex(Math.floor(payload.slice_count / 2));
-      }
-    } catch (err) {
-      setCtMeta(null);
-    }
+    resetRunState();
+    setPlanScoreView("run");
+    setSelectedRunId(runValue);
+    setRunId(runValue);
+    setIsRunning(false);
   }
 
   async function createDose3d() {
@@ -1169,7 +1269,30 @@ export default function HomePage() {
   }, [apiBase, runId]);
 
   useEffect(() => {
-    fetchCtMeta(runId);
+    if (!runId) {
+      setCtMeta(null);
+      return;
+    }
+    let active = true;
+    fetch(`${apiBase}/runs/${runId}/ct/meta`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setCtMeta(payload);
+        if (payload?.slice_count) {
+          setCtSliceIndex(Math.floor(payload.slice_count / 2));
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setCtMeta(null);
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, [apiBase, runId]);
 
   useEffect(() => {
@@ -1177,10 +1300,22 @@ export default function HomePage() {
       setStructures([]);
       return;
     }
+    let active = true;
     fetch(`${apiBase}/runs/${runId}/structures`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((payload) => setStructures(payload?.structures || []))
-      .catch(() => setStructures([]));
+      .then((payload) => {
+        if (active) {
+          setStructures(payload?.structures || []);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setStructures([]);
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, [apiBase, runId]);
 
   useEffect(() => {
@@ -1374,18 +1509,33 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!caseId) {
-      return;
-    }
-    const match = filteredRuns.find((run) => run.case_id === caseId);
-    if (!match) {
       setSelectedRunId("");
+      if (runId) {
+        resetRunState();
+        setRunId("");
+      }
+      if (compareRunA || compareRunB) {
+        clearComparison();
+      }
       return;
     }
-    if (selectedRunId && filteredRuns.some((run) => run.run_id === selectedRunId)) {
-      return;
+    if (runId && !caseRuns.some((run) => run.run_id === runId)) {
+      resetRunState();
+      setRunId("");
     }
-    setSelectedRunId(match.run_id);
-  }, [caseId, filteredRuns, selectedRunId]);
+    if (!caseRuns.length) {
+      setSelectedRunId("");
+    } else if (!selectedRunId || !caseRuns.some((run) => run.run_id === selectedRunId)) {
+      setSelectedRunId(caseRuns[0].run_id);
+    }
+    if (
+      (compareRunA || compareRunB) &&
+      (!caseRuns.some((run) => run.run_id === compareRunA) ||
+        !caseRuns.some((run) => run.run_id === compareRunB))
+    ) {
+      clearComparison();
+    }
+  }, [caseId, caseRuns, runId, selectedRunId, compareRunA, compareRunB]);
 
   const structureNames = useMemo(() => {
     const names = new Set();
@@ -2106,6 +2256,49 @@ export default function HomePage() {
                 Load Selected
               </button>
             </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <div className="card-title">Parameter Sweep</div>
+                <div className="card-subtitle">Batch runs with structured overrides</div>
+              </div>
+            </div>
+            {optimizer !== "echo-vmat" ? (
+              <div className="placeholder">Sweeps are available for ECHO-VMAT only.</div>
+            ) : (
+              <div style={{ display: "grid", gap: "10px" }}>
+                <label htmlFor="sweep-preset">Sweep preset</label>
+                <select
+                  id="sweep-preset"
+                  value={sweepPreset}
+                  onChange={(event) => setSweepPreset(event.target.value)}
+                >
+                  {SWEEP_PRESETS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {activeSweep ? (
+                  <>
+                    <div style={{ color: "#94a3b8", fontSize: "12px" }}>{activeSweep.description}</div>
+                    <div style={{ color: "#94a3b8", fontSize: "12px" }}>
+                      Values: {activeSweep.values.join(", ")}
+                    </div>
+                  </>
+                ) : null}
+                {sweepError ? <div className="placeholder">{sweepError}</div> : null}
+                <button
+                  className="btn"
+                  onClick={startSweep}
+                  disabled={!caseId || sweepStatus === "running"}
+                >
+                  {sweepStatus === "running" ? "Starting sweep..." : "Start Sweep"}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="card">
